@@ -1,11 +1,11 @@
+diff --git a/tools/serve_api.py b/tools/serve_api.py
+index 7bc4419..8d8ba2d 100644
 --- a/tools/serve_api.py
 +++ b/tools/serve_api.py
-@@ -577,8 +577,340 @@
-             out.append("# TYPE %s %s" % (name, kind))
-             out.append("%s %s" % (name, ("%d" % value) if isinstance(value, int) else ("%.6g" % value)))
+@@ -579,6 +579,338 @@ class Metrics:
          return "\n".join(out) + "\n"
-+
-+
+ 
+ 
 +# ---------------------------------------------------------------------------
 +# 0.11.1-report: the per-request usage ledger behind /report, shaped after
 +# llama.cpp-hub's usage page (token-summary / daily-tokens / request-logs).
@@ -111,7 +111,7 @@
 +            except Exception:
 +                pass
 +        return recs
- 
++
 +    def usage(self, unit, count):
 +        empty = {"requests": 0, "prompt": 0, "cached": 0, "output": 0,
 +                 "draft": 0, "draft_accepted": 0}
@@ -126,7 +126,7 @@
 +            b["draft"] += int(r.get("draft_n", 0))
 +            b["draft_accepted"] += int(r.get("draft_n_accepted", 0))
 +        return [buckets.get(l, dict(empty, label=l)) for l in _bucket_labels(unit, count)]
- 
++
 +    def logs(self, page, page_size):
 +        recs = sorted(self._load(), key=lambda r: r.get("ts", 0), reverse=True)
 +        total = len(recs)
@@ -341,7 +341,7 @@
  class EngineBusy(HTTPException):
      def __init__(self):
          super().__init__(status_code=503,
-@@ -2479,7 +2811,7 @@
+@@ -2479,7 +2811,7 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
  
      async def run(ids, max_tokens, stops, drafter=None, sample=None,
                    penalty="", snap=0, snap2=0, images=None, schema=None,
@@ -350,7 +350,7 @@
          """Drives the engine and incrementally detokenizes.
  
          Public issue #13, reported with measurements and a patch by
-@@ -2553,6 +2885,8 @@
+@@ -2553,6 +2885,8 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
                  done = d
                  if d.get("reason") != "error":
                      engine.metrics.record(timings(d), structured=bool(schema))
@@ -359,11 +359,10 @@
                  # The serving ledger an earlier change asked for: what real traffic
                  # actually commits per round, not what a fixture does.
                  # an earlier change: this WAS guarded by `if d.get("rounds")`, i.e. it
-@@ -3657,7 +3991,34 @@
-         total = st["hits"] + st["misses"]
+@@ -3658,6 +3992,33 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
          st["hit_rate"] = round(st["hits"] / total, 4) if total else None
          return st
-+
+ 
 +    # ------------------------------------------------------------------
 +    # 0.11.1-report: the usage page and its JSON endpoints. Same shape as
 +    # llama.cpp-hub's 用量报表: summary cards, a bucketed bar chart over
@@ -376,7 +375,7 @@
 +        count = max(1, min(count, 24 * 60))
 +        return {"success": True, "unit": unit, "count": count,
 +                "data": engine.ledger.usage(unit, count)}
- 
++
 +    @app.get("/api/report/logs")
 +    async def report_logs(page: int = 1, pageSize: int = 30):
 +        page = max(1, page)
@@ -394,21 +393,27 @@
      @app.get("/v1/models")
      async def models():
          return {"object": "list",
-@@ -3833,7 +4194,23 @@
-                     pre="", forced=False, include_usage=False, snap=0,
+@@ -3834,6 +4195,30 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
                      snap2=0, wire="chat", images=None, want_summary=False,
                      schema=None, think_budget=None, seg=None,
--                    http_request=None):
-+                    http_request=None, endpoint=None):
+                     http_request=None):
 +        # 0.11.1-report: the ledger context. Built once here, from what the
 +        # route already knows, and threaded into run() so the D line lands
-+        # beside the endpoint name and the client address. `endpoint` is
-+        # passed by the route rather than derived from `wire`: wire says how
-+        # the bytes are serialized, the route says who asked.
++        # beside the endpoint name and the client address. The endpoint is
++        # read off the request URL rather than derived from `wire`: `wire`
++        # says how the bytes are serialized, the URL says who asked, and
++        # leaving this signature alone keeps the patch off the line upstream
++        # is most likely to extend.
++        _path = None
++        if http_request is not None:
++            try:
++                _path = http_request.url.path
++            except Exception:
++                _path = None
 +        ctx = {
-+            "endpoint": endpoint or ("/v1/" + ("responses" if wire == "responses"
-+                                             else ("completions" if not chat
-+                                                   else "chat/completions"))),
++            "endpoint": _path or ("/v1/" + ("responses" if wire == "responses"
++                                           else ("completions" if not chat
++                                                 else "chat/completions"))),
 +            "model": MODEL_ID,
 +            "client": (http_request.client.host if http_request is not None
 +                       and getattr(http_request, "client", None) else ""),
@@ -419,7 +424,7 @@
          # 0.8.0: the schema rides the GEN line; the engine constrains
          # only after the thinking block (the </think> token, when the request
          # thinks) and lets a request with tools open a tool call instead of
-@@ -3951,7 +4328,7 @@
+@@ -3951,7 +4336,7 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
                  try:
                      gen = guarded(run(ids, max_tokens, stops, drafter, sample,
                                        penalty, snap, snap2, images, schema,
@@ -428,7 +433,7 @@
                      # The Responses wire is a different SERIALIZATION of the
                      # same generation. Everything that matters for safety --
                      # the slot semaphore, the abort on hangup, the inflight
-@@ -4042,7 +4419,7 @@
+@@ -4042,7 +4427,7 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
              # generator is closed exactly as the streaming arm's is, which is
              # what sends the abort, and the reply nobody reads is a 499.
              gen = run(ids, max_tokens, stops, drafter, sample, penalty, snap,
@@ -437,7 +442,7 @@
              gone, n_tok = False, 0
              try:
                  async for delta, d in gen:
-@@ -4375,6 +4752,10 @@
+@@ -4375,6 +4760,10 @@ def main():
                "will be refused", flush=True)
      host, _, port = args.engine.partition(":")
      engine = Engine(host, int(port))
