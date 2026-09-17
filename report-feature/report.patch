@@ -1,8 +1,8 @@
 diff --git a/tools/serve_api.py b/tools/serve_api.py
-index 7bc4419..b5c6981 100644
+index 7bc4419..42e4dd3 100644
 --- a/tools/serve_api.py
 +++ b/tools/serve_api.py
-@@ -579,6 +579,349 @@ class Metrics:
+@@ -579,6 +579,353 @@ class Metrics:
          return "\n".join(out) + "\n"
  
  
@@ -26,7 +26,11 @@ index 7bc4419..b5c6981 100644
 +        return time.strftime("%G-W%V", lt)
 +    if unit == "month":
 +        return time.strftime("%Y-%m", lt)
-+    return time.strftime("%Y-%m-%d", lt)
++    # day: no year on the axis. A rotated "2026-08-19" gets its left edge
++    # (the year) clipped by the canvas boundary, leaving a stray leading
++    # "-08-19". The year is redundant on a 30-day window; it lives in the
++    # chart title instead.
++    return time.strftime("%m-%d", lt)
 +
 +
 +def _bucket_labels(unit, count):
@@ -52,7 +56,7 @@ index 7bc4419..b5c6981 100644
 +            labels.append("%04d-%02d" % (yy, mm))
 +    else:
 +        base = int(now // 86400)
-+        labels = [time.strftime("%Y-%m-%d", time.gmtime((base - i) * 86400))
++        labels = [time.strftime("%m-%d", time.gmtime((base - i) * 86400))
 +                 for i in range(count - 1, -1, -1)]
 +    return labels
 +
@@ -352,7 +356,7 @@ index 7bc4419..b5c6981 100644
  class EngineBusy(HTTPException):
      def __init__(self):
          super().__init__(status_code=503,
-@@ -2479,7 +2822,7 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
+@@ -2479,7 +2826,7 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
  
      async def run(ids, max_tokens, stops, drafter=None, sample=None,
                    penalty="", snap=0, snap2=0, images=None, schema=None,
@@ -361,7 +365,7 @@ index 7bc4419..b5c6981 100644
          """Drives the engine and incrementally detokenizes.
  
          Public issue #13, reported with measurements and a patch by
-@@ -2553,6 +2896,8 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
+@@ -2553,6 +2900,8 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
                  done = d
                  if d.get("reason") != "error":
                      engine.metrics.record(timings(d), structured=bool(schema))
@@ -370,7 +374,7 @@ index 7bc4419..b5c6981 100644
                  # The serving ledger an earlier change asked for: what real traffic
                  # actually commits per round, not what a fixture does.
                  # an earlier change: this WAS guarded by `if d.get("rounds")`, i.e. it
-@@ -3658,6 +4003,33 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
+@@ -3658,6 +4007,33 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
          st["hit_rate"] = round(st["hits"] / total, 4) if total else None
          return st
  
@@ -404,7 +408,7 @@ index 7bc4419..b5c6981 100644
      @app.get("/v1/models")
      async def models():
          return {"object": "list",
-@@ -3834,6 +4206,30 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
+@@ -3834,6 +4210,30 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
                      snap2=0, wire="chat", images=None, want_summary=False,
                      schema=None, think_budget=None, seg=None,
                      http_request=None):
@@ -435,7 +439,7 @@ index 7bc4419..b5c6981 100644
          # 0.8.0: the schema rides the GEN line; the engine constrains
          # only after the thinking block (the </think> token, when the request
          # thinks) and lets a request with tools open a tool call instead of
-@@ -3951,7 +4347,7 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
+@@ -3951,7 +4351,7 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
                  try:
                      gen = guarded(run(ids, max_tokens, stops, drafter, sample,
                                        penalty, snap, snap2, images, schema,
@@ -444,7 +448,7 @@ index 7bc4419..b5c6981 100644
                      # The Responses wire is a different SERIALIZATION of the
                      # same generation. Everything that matters for safety --
                      # the slot semaphore, the abort on hangup, the inflight
-@@ -4042,7 +4438,7 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
+@@ -4042,7 +4442,7 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
              # generator is closed exactly as the streaming arm's is, which is
              # what sends the abort, and the reply nobody reads is a 499.
              gen = run(ids, max_tokens, stops, drafter, sample, penalty, snap,
@@ -453,7 +457,7 @@ index 7bc4419..b5c6981 100644
              gone, n_tok = False, 0
              try:
                  async for delta, d in gen:
-@@ -4375,6 +4771,10 @@ def main():
+@@ -4375,6 +4775,10 @@ def main():
                "will be refused", flush=True)
      host, _, port = args.engine.partition(":")
      engine = Engine(host, int(port))

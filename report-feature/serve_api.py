@@ -599,7 +599,11 @@ def _label(ts, unit):
         return time.strftime("%G-W%V", lt)
     if unit == "month":
         return time.strftime("%Y-%m", lt)
-    return time.strftime("%Y-%m-%d", lt)
+    # day: no year on the axis. A rotated "2026-08-19" gets its left edge
+    # (the year) clipped by the canvas boundary, leaving a stray leading
+    # "-08-19". The year is redundant on a 30-day window; it lives in the
+    # chart title instead.
+    return time.strftime("%m-%d", lt)
 
 
 def _bucket_labels(unit, count):
@@ -625,7 +629,7 @@ def _bucket_labels(unit, count):
             labels.append("%04d-%02d" % (yy, mm))
     else:
         base = int(now // 86400)
-        labels = [time.strftime("%Y-%m-%d", time.gmtime((base - i) * 86400))
+        labels = [time.strftime("%m-%d", time.gmtime((base - i) * 86400))
                  for i in range(count - 1, -1, -1)]
     return labels
 
