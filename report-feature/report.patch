@@ -1,8 +1,8 @@
 diff --git a/tools/serve_api.py b/tools/serve_api.py
-index 7bc4419..8d8ba2d 100644
+index 7bc4419..995b9f4 100644
 --- a/tools/serve_api.py
 +++ b/tools/serve_api.py
-@@ -579,6 +579,338 @@ class Metrics:
+@@ -579,6 +579,339 @@ class Metrics:
          return "\n".join(out) + "\n"
  
  
@@ -299,7 +299,8 @@ index 7bc4419..8d8ba2d 100644
 +  rows.forEach((r,i)=>{series.forEach((s,j)=>{const val=r[s[0]]||0;const h=ch*val/max;const x=pad.l+i*bw+gap+(sub+gap)*j;const y=pad.t+ch-h;c.fillStyle=s[1];c.fillRect(x,y,sub,Math.max(h,0));});});
 +  // x labels (thin)
 +  c.fillStyle='#9aa4b2';c.textAlign='center';const step=Math.ceil(n/8);
-+  rows.forEach((r,i)=>{if(i%step===0||i===n-1)c.fillText(r.label,pad.l+i*bw+bw/2,H-12);});
++  let lastDrawn=-step;
++  rows.forEach((r,i)=>{if(i-lastDrawn>=step){c.fillText(r.label,pad.l+i*bw+bw/2,H-12);lastDrawn=i;}});
 +  c.textAlign='left';
 +}
 +async function loadLogs(){
@@ -341,7 +342,7 @@ index 7bc4419..8d8ba2d 100644
  class EngineBusy(HTTPException):
      def __init__(self):
          super().__init__(status_code=503,
-@@ -2479,7 +2811,7 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
+@@ -2479,7 +2812,7 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
  
      async def run(ids, max_tokens, stops, drafter=None, sample=None,
                    penalty="", snap=0, snap2=0, images=None, schema=None,
@@ -350,7 +351,7 @@ index 7bc4419..8d8ba2d 100644
          """Drives the engine and incrementally detokenizes.
  
          Public issue #13, reported with measurements and a patch by
-@@ -2553,6 +2885,8 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
+@@ -2553,6 +2886,8 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
                  done = d
                  if d.get("reason") != "error":
                      engine.metrics.record(timings(d), structured=bool(schema))
@@ -359,7 +360,7 @@ index 7bc4419..8d8ba2d 100644
                  # The serving ledger an earlier change asked for: what real traffic
                  # actually commits per round, not what a fixture does.
                  # an earlier change: this WAS guarded by `if d.get("rounds")`, i.e. it
-@@ -3658,6 +3992,33 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
+@@ -3658,6 +3993,33 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
          st["hit_rate"] = round(st["hits"] / total, 4) if total else None
          return st
  
@@ -393,7 +394,7 @@ index 7bc4419..8d8ba2d 100644
      @app.get("/v1/models")
      async def models():
          return {"object": "list",
-@@ -3834,6 +4195,30 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
+@@ -3834,6 +4196,30 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
                      snap2=0, wire="chat", images=None, want_summary=False,
                      schema=None, think_budget=None, seg=None,
                      http_request=None):
@@ -424,7 +425,7 @@ index 7bc4419..8d8ba2d 100644
          # 0.8.0: the schema rides the GEN line; the engine constrains
          # only after the thinking block (the </think> token, when the request
          # thinks) and lets a request with tools open a tool call instead of
-@@ -3951,7 +4336,7 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
+@@ -3951,7 +4337,7 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
                  try:
                      gen = guarded(run(ids, max_tokens, stops, drafter, sample,
                                        penalty, snap, snap2, images, schema,
@@ -433,7 +434,7 @@ index 7bc4419..8d8ba2d 100644
                      # The Responses wire is a different SERIALIZATION of the
                      # same generation. Everything that matters for safety --
                      # the slot semaphore, the abort on hangup, the inflight
-@@ -4042,7 +4427,7 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
+@@ -4042,7 +4428,7 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
              # generator is closed exactly as the streaming arm's is, which is
              # what sends the abort, and the reply nobody reads is a 499.
              gen = run(ids, max_tokens, stops, drafter, sample, penalty, snap,
@@ -442,7 +443,7 @@ index 7bc4419..8d8ba2d 100644
              gone, n_tok = False, 0
              try:
                  async for delta, d in gen:
-@@ -4375,6 +4760,10 @@ def main():
+@@ -4375,6 +4761,10 @@ def main():
                "will be refused", flush=True)
      host, _, port = args.engine.partition(":")
      engine = Engine(host, int(port))

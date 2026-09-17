@@ -872,7 +872,8 @@ function drawChart(rows){
   rows.forEach((r,i)=>{series.forEach((s,j)=>{const val=r[s[0]]||0;const h=ch*val/max;const x=pad.l+i*bw+gap+(sub+gap)*j;const y=pad.t+ch-h;c.fillStyle=s[1];c.fillRect(x,y,sub,Math.max(h,0));});});
   // x labels (thin)
   c.fillStyle='#9aa4b2';c.textAlign='center';const step=Math.ceil(n/8);
-  rows.forEach((r,i)=>{if(i%step===0||i===n-1)c.fillText(r.label,pad.l+i*bw+bw/2,H-12);});
+  let lastDrawn=-step;
+  rows.forEach((r,i)=>{if(i-lastDrawn>=step){c.fillText(r.label,pad.l+i*bw+bw/2,H-12);lastDrawn=i;}});
   c.textAlign='left';
 }
 async function loadLogs(){
