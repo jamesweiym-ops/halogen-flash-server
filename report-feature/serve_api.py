@@ -767,7 +767,7 @@ h1{font-size:18px;margin:0 0 14px;display:flex;align-items:center;gap:8px;}
 .units{display:flex;gap:4px;}
 .units button{padding:5px 10px;border:1px solid var(--border);border-radius:6px;background:transparent;color:var(--muted);font-size:12px;cursor:pointer;font-family:inherit;}
 .units button.active{background:var(--accent);border-color:var(--accent);color:#fff;}
-canvas{width:100%;height:260px;display:block;}
+canvas{width:100%;height:300px;display:block;}
 .legend{display:flex;gap:16px;margin-top:8px;font-size:12px;color:var(--muted);flex-wrap:wrap;}
 .legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:middle;}
 table{width:100%;border-collapse:collapse;font-size:12.5px;}
@@ -860,8 +860,8 @@ async function loadUsage(){
 }
 function drawChart(rows){
   const cv=document.getElementById('cv');const dpr=window.devicePixelRatio||1;
-  const W=cv.clientWidth,H=260;cv.width=W*dpr;cv.height=H*dpr;const c=cv.getContext('2d');c.scale(dpr,dpr);c.clearRect(0,0,W,H);
-  const pad={l:44,r:12,t:14,b:34};const cw=W-pad.l-pad.r,ch=H-pad.t-pad.b;
+  const W=cv.clientWidth,H=300;cv.width=W*dpr;cv.height=H*dpr;const c=cv.getContext('2d');c.scale(dpr,dpr);c.clearRect(0,0,W,H);
+  const pad={l:44,r:12,t:14,b:56};const cw=W-pad.l-pad.r,ch=H-pad.t-pad.b;
   let max=0;rows.forEach(r=>{max=Math.max(max,r.prompt,r.cached,r.output);});if(max<=0)max=1;
   const n=rows.length;if(!n){c.fillStyle='#9aa4b2';c.font='13px sans-serif';c.fillText('暂无数据',pad.l,pad.t+20);return;}
   const bw=cw/n;const series=[['prompt','#6366f1'],['cached','#22d3ee'],['output','#34d399']];
@@ -870,10 +870,20 @@ function drawChart(rows){
   for(let g=0;g<=4;g++){const y=pad.t+ch-ch*g/4;c.beginPath();c.moveTo(pad.l,y);c.lineTo(W-pad.r,y);c.stroke();c.fillText(fmt(max*g/4),4,y+3);}
   const sub=Math.min(bw/series.length-1,14);const gap=(bw-sub*series.length)/(series.length+1);
   rows.forEach((r,i)=>{series.forEach((s,j)=>{const val=r[s[0]]||0;const h=ch*val/max;const x=pad.l+i*bw+gap+(sub+gap)*j;const y=pad.t+ch-h;c.fillStyle=s[1];c.fillRect(x,y,sub,Math.max(h,0));});});
-  // x labels (thin)
-  c.fillStyle='#9aa4b2';c.textAlign='center';const step=Math.ceil(n/8);
-  let lastDrawn=-step;
-  rows.forEach((r,i)=>{if(i-lastDrawn>=step){c.fillText(r.label,pad.l+i*bw+bw/2,H-12);lastDrawn=i;}});
+  // x labels: draw EVERY bucket. A stride (one label per 4 days) reads as
+  // missing days even though the bars are contiguous, so when the bars are
+  // too narrow for a horizontal date we rotate -45deg instead of skipping.
+  c.fillStyle='#9aa4b2';
+  const maxW = rows.reduce((m,r)=>Math.max(m,c.measureText(r.label).width),0);
+  const rotate = maxW + 6 > bw;
+  rows.forEach((r,i)=>{
+    const x = pad.l + i*bw + bw/2;
+    if(!rotate){ c.textAlign='center'; c.fillText(r.label, x, H-16); }
+    else {
+      c.save(); c.translate(x, H-20); c.rotate(-Math.PI/4);
+      c.textAlign='right'; c.fillText(r.label, 0, 0); c.restore();
+    }
+  });
   c.textAlign='left';
 }
 async function loadLogs(){

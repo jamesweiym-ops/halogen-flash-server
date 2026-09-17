@@ -1,8 +1,8 @@
 diff --git a/tools/serve_api.py b/tools/serve_api.py
-index 7bc4419..995b9f4 100644
+index 7bc4419..b5c6981 100644
 --- a/tools/serve_api.py
 +++ b/tools/serve_api.py
-@@ -579,6 +579,339 @@ class Metrics:
+@@ -579,6 +579,349 @@ class Metrics:
          return "\n".join(out) + "\n"
  
  
@@ -194,7 +194,7 @@ index 7bc4419..995b9f4 100644
 +.units{display:flex;gap:4px;}
 +.units button{padding:5px 10px;border:1px solid var(--border);border-radius:6px;background:transparent;color:var(--muted);font-size:12px;cursor:pointer;font-family:inherit;}
 +.units button.active{background:var(--accent);border-color:var(--accent);color:#fff;}
-+canvas{width:100%;height:260px;display:block;}
++canvas{width:100%;height:300px;display:block;}
 +.legend{display:flex;gap:16px;margin-top:8px;font-size:12px;color:var(--muted);flex-wrap:wrap;}
 +.legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:middle;}
 +table{width:100%;border-collapse:collapse;font-size:12.5px;}
@@ -287,8 +287,8 @@ index 7bc4419..995b9f4 100644
 +}
 +function drawChart(rows){
 +  const cv=document.getElementById('cv');const dpr=window.devicePixelRatio||1;
-+  const W=cv.clientWidth,H=260;cv.width=W*dpr;cv.height=H*dpr;const c=cv.getContext('2d');c.scale(dpr,dpr);c.clearRect(0,0,W,H);
-+  const pad={l:44,r:12,t:14,b:34};const cw=W-pad.l-pad.r,ch=H-pad.t-pad.b;
++  const W=cv.clientWidth,H=300;cv.width=W*dpr;cv.height=H*dpr;const c=cv.getContext('2d');c.scale(dpr,dpr);c.clearRect(0,0,W,H);
++  const pad={l:44,r:12,t:14,b:56};const cw=W-pad.l-pad.r,ch=H-pad.t-pad.b;
 +  let max=0;rows.forEach(r=>{max=Math.max(max,r.prompt,r.cached,r.output);});if(max<=0)max=1;
 +  const n=rows.length;if(!n){c.fillStyle='#9aa4b2';c.font='13px sans-serif';c.fillText('暂无数据',pad.l,pad.t+20);return;}
 +  const bw=cw/n;const series=[['prompt','#6366f1'],['cached','#22d3ee'],['output','#34d399']];
@@ -297,10 +297,20 @@ index 7bc4419..995b9f4 100644
 +  for(let g=0;g<=4;g++){const y=pad.t+ch-ch*g/4;c.beginPath();c.moveTo(pad.l,y);c.lineTo(W-pad.r,y);c.stroke();c.fillText(fmt(max*g/4),4,y+3);}
 +  const sub=Math.min(bw/series.length-1,14);const gap=(bw-sub*series.length)/(series.length+1);
 +  rows.forEach((r,i)=>{series.forEach((s,j)=>{const val=r[s[0]]||0;const h=ch*val/max;const x=pad.l+i*bw+gap+(sub+gap)*j;const y=pad.t+ch-h;c.fillStyle=s[1];c.fillRect(x,y,sub,Math.max(h,0));});});
-+  // x labels (thin)
-+  c.fillStyle='#9aa4b2';c.textAlign='center';const step=Math.ceil(n/8);
-+  let lastDrawn=-step;
-+  rows.forEach((r,i)=>{if(i-lastDrawn>=step){c.fillText(r.label,pad.l+i*bw+bw/2,H-12);lastDrawn=i;}});
++  // x labels: draw EVERY bucket. A stride (one label per 4 days) reads as
++  // missing days even though the bars are contiguous, so when the bars are
++  // too narrow for a horizontal date we rotate -45deg instead of skipping.
++  c.fillStyle='#9aa4b2';
++  const maxW = rows.reduce((m,r)=>Math.max(m,c.measureText(r.label).width),0);
++  const rotate = maxW + 6 > bw;
++  rows.forEach((r,i)=>{
++    const x = pad.l + i*bw + bw/2;
++    if(!rotate){ c.textAlign='center'; c.fillText(r.label, x, H-16); }
++    else {
++      c.save(); c.translate(x, H-20); c.rotate(-Math.PI/4);
++      c.textAlign='right'; c.fillText(r.label, 0, 0); c.restore();
++    }
++  });
 +  c.textAlign='left';
 +}
 +async function loadLogs(){
@@ -342,7 +352,7 @@ index 7bc4419..995b9f4 100644
  class EngineBusy(HTTPException):
      def __init__(self):
          super().__init__(status_code=503,
-@@ -2479,7 +2812,7 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
+@@ -2479,7 +2822,7 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
  
      async def run(ids, max_tokens, stops, drafter=None, sample=None,
                    penalty="", snap=0, snap2=0, images=None, schema=None,
@@ -351,7 +361,7 @@ index 7bc4419..995b9f4 100644
          """Drives the engine and incrementally detokenizes.
  
          Public issue #13, reported with measurements and a patch by
-@@ -2553,6 +2886,8 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
+@@ -2553,6 +2896,8 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
                  done = d
                  if d.get("reason") != "error":
                      engine.metrics.record(timings(d), structured=bool(schema))
@@ -360,7 +370,7 @@ index 7bc4419..995b9f4 100644
                  # The serving ledger an earlier change asked for: what real traffic
                  # actually commits per round, not what a fixture does.
                  # an earlier change: this WAS guarded by `if d.get("rounds")`, i.e. it
-@@ -3658,6 +3993,33 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
+@@ -3658,6 +4003,33 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
          st["hit_rate"] = round(st["hits"] / total, 4) if total else None
          return st
  
@@ -394,7 +404,7 @@ index 7bc4419..995b9f4 100644
      @app.get("/v1/models")
      async def models():
          return {"object": "list",
-@@ -3834,6 +4196,30 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
+@@ -3834,6 +4206,30 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
                      snap2=0, wire="chat", images=None, want_summary=False,
                      schema=None, think_budget=None, seg=None,
                      http_request=None):
@@ -425,7 +435,7 @@ index 7bc4419..995b9f4 100644
          # 0.8.0: the schema rides the GEN line; the engine constrains
          # only after the thinking block (the </think> token, when the request
          # thinks) and lets a request with tools open a tool call instead of
-@@ -3951,7 +4337,7 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
+@@ -3951,7 +4347,7 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
                  try:
                      gen = guarded(run(ids, max_tokens, stops, drafter, sample,
                                        penalty, snap, snap2, images, schema,
@@ -434,7 +444,7 @@ index 7bc4419..995b9f4 100644
                      # The Responses wire is a different SERIALIZATION of the
                      # same generation. Everything that matters for safety --
                      # the slot semaphore, the abort on hangup, the inflight
-@@ -4042,7 +4428,7 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
+@@ -4042,7 +4438,7 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
              # generator is closed exactly as the streaming arm's is, which is
              # what sends the abort, and the reply nobody reads is a 499.
              gen = run(ids, max_tokens, stops, drafter, sample, penalty, snap,
@@ -443,7 +453,7 @@ index 7bc4419..995b9f4 100644
              gone, n_tok = False, 0
              try:
                  async for delta, d in gen:
-@@ -4375,6 +4761,10 @@ def main():
+@@ -4375,6 +4771,10 @@ def main():
                "will be refused", flush=True)
      host, _, port = args.engine.partition(":")
      engine = Engine(host, int(port))
