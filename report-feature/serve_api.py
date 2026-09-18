@@ -1652,6 +1652,27 @@ class Engine:
                 "hits": int(p[29]), "misses": int(p[30]), "persisted": int(p[31]),
                 "branches": int(p[32]), "evicted": int(p[33]), "skipped": int(p[34]),
                 "restore_ms_total": float(p[35]), "restored_bytes": int(p[36])}
+        if len(p) >= 39:
+            # 0.11.3: snapshots taken mid-call by the tap (cache mode 2 no
+            # longer splits the prefill at a snapshot point; a store at the
+            # end of a call is not one), and hits on a whole-prompt entry (an
+            # exact repeat of a request: nothing is forwarded, the answer is
+            # the first answer's).
+            d["tapped"] = int(p[37])
+            d["full_hits"] = int(p[38])
+        if len(p) >= 43:
+            # 0.11.4 (issue #68): the KV pool's no-room path. A request the
+            # pool cannot place yet waits at the head of the queue for a
+            # busy region to retire (`waiting_for_room` 1, `waiting_s` how
+            # long); the last resort when nothing else can be forgotten
+            # moves the conversation's own rows to the free span
+            # (`relocated`) or, when they cannot be copied there, forgets
+            # them and runs the turn cold (`cold_resorts`). Before 0.11.4
+            # that request waited forever with /health reading healthy.
+            d["pool"] = {"waiting_for_room": int(p[39]),
+                         "waiting_s": float(p[40]),
+                         "relocated": int(p[41]),
+                         "cold_resorts": int(p[42])}
         return d
 
     async def abort(self):
@@ -3505,14 +3526,26 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
         # text.delta` events, no `encrypted_content`), and, when the request
         # asked for a reasoning summary, the SAME text again as the item's
         # `summary_text` with `response.reasoning_summary_*` events. There is
-        # no separate summarizer; the summary is the reasoning. Both are
-        # sent because they reach different readers: Codex renders summaries
-        # by default and raw content only with `show_raw_agent_reasoning`
-        # (its source, codex-rs/protocol legacy_events.rs), and the request
-        # recorded from the real CLI asks for `{"summary": "auto"}`; an SDK
-        # client reads `content`. The text is trimmed the way the chat route trims
-        # `reasoning_content`, so the item's final text equals what the
-        # non-streamed body carries.
+        # no separate summarizer; the summary is the reasoning. The ITEM
+        # carries both because they reach different readers: Codex renders
+        # summaries by default and raw content only with
+        # `show_raw_agent_reasoning` (its source, codex-rs/protocol
+        # legacy_events.rs), and the request recorded from the real CLI asks
+        # for `{"summary": "auto"}`; an SDK client reads `content`. The text
+        # is trimmed the way the chat route trims `reasoning_content`, so the
+        # item's final text equals what the non-streamed body carries.
+        #
+        # 0.11.3, issue #67 (@UtkuKaynak): the DELTAS go out on ONE stream,
+        # the one the request asked for. 0.7.0 streamed the same text as
+        # `reasoning_text.delta` AND, with a summary asked, as
+        # `reasoning_summary_text.delta`, and a client that follows the
+        # published stream (oh-my-pi's provider, pi's) appends both kinds of
+        # delta to one thinking block -- the raw kind exists for servers that
+        # stream thinking INSTEAD of summaries -- so every word rendered
+        # twice. With a summary asked only the summary events stream (and
+        # its `.done`); without one, only the raw ones. The item on
+        # `output_item.done` and in the final body is unchanged: a client
+        # that finalizes from it takes `summary` first, then `content`.
         rs_id = "rs_" + rid.split("_", 1)[-1]
         rs_open = False
         rs_index = None
@@ -3538,13 +3571,12 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
         def reasoning_delta(rd):
             nonlocal rs_text
             rs_text += rd
-            out = ev("response.reasoning_text.delta", item_id=rs_id,
-                     output_index=rs_index, content_index=0, delta=rd)
-            if want_summary:
-                out += ev("response.reasoning_summary_text.delta",
+            if want_summary:   # #67: one stream, the one asked for
+                return ev("response.reasoning_summary_text.delta",
                           item_id=rs_id, output_index=rs_index,
                           summary_index=0, delta=rd)
-            return out
+            return ev("response.reasoning_text.delta", item_id=rs_id,
+                      output_index=rs_index, content_index=0, delta=rd)
 
         def close_reasoning():
             nonlocal rs_open
@@ -3555,16 +3587,17 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
                     "content": [{"type": "reasoning_text", "text": rs_text}],
                     "encrypted_content": None}
             done_items.append((rs_index, item))
-            out = ev("response.reasoning_text.done", item_id=rs_id,
-                     output_index=rs_index, content_index=0, text=rs_text)
-            if want_summary:
-                out += ev("response.reasoning_summary_text.done",
-                          item_id=rs_id, output_index=rs_index,
-                          summary_index=0, text=rs_text)
+            if want_summary:   # #67: the summary stream's close, not both
+                out = ev("response.reasoning_summary_text.done",
+                         item_id=rs_id, output_index=rs_index,
+                         summary_index=0, text=rs_text)
                 out += ev("response.reasoning_summary_part.done",
                           item_id=rs_id, output_index=rs_index,
                           summary_index=0,
                           part={"type": "summary_text", "text": rs_text})
+            else:
+                out = ev("response.reasoning_text.done", item_id=rs_id,
+                         output_index=rs_index, content_index=0, text=rs_text)
             out += ev("response.output_item.done", output_index=rs_index,
                       item=item)
             return out
@@ -3811,13 +3844,17 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
                     # replays the boundaries a cold run would have used and the
                     # warm answer is bitwise the cold one. Mode 2 snapshots at
                     # every request end and gives that up for a follow-up turn
-                    # that costs a second or two at any prompt length. In mode
-                    # 2 the alignment is meaningless — the snapshot is wherever
-                    # the last request stopped — so it is reported as 0 rather
-                    # than as the chunk, which would read as a guarantee.
+                    # that costs a second or two at any prompt length. Mode 2
+                    # reported 0 through 0.11.2 (the snapshot was wherever the
+                    # request's stable prefix ended); since 0.11.3 the engine
+                    # reports the grid its mid-call snapshots land on (64), and
+                    # an older engine still sends the chunk here, so the mode-2
+                    # value is taken only when it is that small.
                     "snapshot_align":
                         engine.info.get("cache_align", 0)
-                        if engine.info.get("cache_mode", 1) == 1 else 0,
+                        if engine.info.get("cache_mode", 1) == 1
+                        else (engine.info.get("cache_align", 0)
+                              if 0 < engine.info.get("cache_align", 0) <= 256 else 0),
                     # Read from the mode the engine reports, which is the
                     # only thing that decides it. Deriving this from anything
                     # else (a hardcoded limit, or "is the prefill chunked")

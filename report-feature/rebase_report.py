@@ -39,6 +39,9 @@ MOUNT = f"{STAGE}:/halogen/tools/serve_api.py:ro"
 
 
 class Docker(http.client.HTTPConnection):
+    def __init__(self):
+        super().__init__("localhost")
+
     def connect(self):
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.sock.connect("/var/run/docker.sock")
@@ -167,15 +170,17 @@ def rebase(image, workdir):
     if r.returncode != 0:
         sys.exit("merged file is not valid Python; not deploying.\n" + r.stderr)
 
-    # sanity: the feature is actually present
-    for probe in ("engine.ledger.record", "REPORT_HTML", "/api/report/usage"):
+    # sanity: the feature is actually present, and it is the CURRENT feature
+    # (the years/months browser), not a stale copy of the patch.
+    for probe in ("engine.ledger.record", "REPORT_HTML", "/api/report/usage",
+                  "/api/report/months"):
         if probe not in text:
             sys.exit(f"feature marker {probe!r} missing after merge; not deploying.")
 
     return merged
 
 
-def deploy(name, merged_path):
+def deploy(name, merged_path, image):
     health = json.load(urllib.request.urlopen(f"http://127.0.0.1:8731/health"))
     if health.get("in_flight") or health.get("queued"):
         sys.exit("active requests; refusing to interrupt")
@@ -190,7 +195,22 @@ def deploy(name, merged_path):
                            if "serve_api" not in json.dumps(m)]
     config["HostConfig"] = hostconfig
 
+    # Switch to the NEW image. The old container's Config carries the old
+    # tag, and its HALOGEN_IMAGE_VERSION env would otherwise keep /health
+    # reporting the old version against the new engine.
+    config["Image"] = image
+    tag = image.rsplit(":", 1)[-1] if ":" in image.rsplit("/", 1)[-1] else "latest"
+    env = [e for e in config.get("Env", [])
+           if not e.startswith("HALOGEN_IMAGE_VERSION=")]
+    env.append("HALOGEN_IMAGE_VERSION=" + tag)
+    config["Env"] = env
+    try:
+        config["Labels"] = api("GET", "/images/" + image + "/json")["Config"].get("Labels", {})
+    except Exception:
+        pass
+
     backup = f"{name}-before-report-rebase-{time.strftime('%Y%m%d-%H%M%S')}"
+    print(f"switching image -> {image}")
     print(f"stopping {name}; backup -> {backup}")
     api("POST", f"/containers/{name}/stop?t=40")
     api("POST", f"/containers/{name}/rename?name={backup}")
@@ -230,7 +250,7 @@ def main():
         with open(merged) as f, open(STAGE, "w") as t:
             t.write(f.read())
         print("staged ->", STAGE)
-        deploy(a.name, STAGE)
+        deploy(a.name, STAGE, a.image)
         for p in ("/report", "/api/report/totals"):
             try:
                 r = urllib.request.urlopen("http://127.0.0.1:8731" + p, timeout=5)

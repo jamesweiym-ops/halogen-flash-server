@@ -23,8 +23,13 @@ presenting a derivative as halogen, is not. Do not make this repo public.
 
 Base file identity: `tools/serve_api.py` as shipped in
 `ghcr.io/peonist-ai/halogen-flash-server:0.11.1`, 234400 bytes,
-md5 `9265df06010e2e778bc78248c93a081d`. `report.patch` reproduces
-`serve_api.py` from that base byte-for-byte.
+md5 `9265df06010e2e778bc78248c93a081d`. `report.patch` reproduces the
+0.11.1-based `serve_api.py` from that base byte-for-byte.
+
+Current deployment: **0.11.4**. The tree landed on it with a clean
+cherry-pick (no conflict), so `serve_api.py` in this directory is the
+0.11.4-merged file now running. `pristine-0.11.1.py` stays as the merge
+base the rebase tool needs; it is deliberately not bumped per release.
 
 ## What it records
 
