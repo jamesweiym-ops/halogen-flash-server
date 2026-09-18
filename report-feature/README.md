@@ -1,8 +1,9 @@
 # /report usage dashboard — private deployment copy
 
-My working copy of the halogen OpenAI front-end (`serve_api.py`) with a
-per-request usage ledger and a `/report` dashboard added on top of the
-`0.11.1` image's file.
+My working copy of the halogen OpenAI front-end (`serve_api.py`): a
+per-request usage ledger + `/report` dashboard, plus a fix so an omitted
+output budget is clamped to the context room. Built on the current image's
+file, `0.11.4`.
 
 **PRIVATE repo.** `serve_api.py` is the proprietary front-end that ships
 inside `ghcr.io/peonist-ai/halogen-flash-server` and is deliberately **not**
@@ -16,20 +17,20 @@ presenting a derivative as halogen, is not. Do not make this repo public.
 | file | what |
 |---|---|
 | `serve_api.py` | the patched front-end currently running on the AIPC |
-| `report.patch` | `git diff` of my changes vs the pristine 0.11.1 file |
-| `pristine-0.11.1.py` | the untouched 0.11.1 front-end = the merge base |
+| `report.patch` | `git diff` of my changes vs the pristine 0.11.4 file |
+| `pristine-0.11.4.py` | the untouched 0.11.4 front-end = the merge base |
+| `pristine-0.11.1.py` | the earlier merge base, kept for history |
 | `rebase_report.py` | re-lands the feature onto a NEWER image, then deploys |
 | `ISSUE_report_feature.md` | the write-up for the upstream issue tracker |
 
 Base file identity: `tools/serve_api.py` as shipped in
-`ghcr.io/peonist-ai/halogen-flash-server:0.11.1`, 234400 bytes,
-md5 `9265df06010e2e778bc78248c93a081d`. `report.patch` reproduces the
-0.11.1-based `serve_api.py` from that base byte-for-byte.
+`ghcr.io/peonist-ai/halogen-flash-server:0.11.4`, 236853 bytes,
+md5 `f691463f248a3a548ca71a35bb9e3249`. `report.patch` reproduces
+`serve_api.py` from that base byte-for-byte.
 
-Current deployment: **0.11.4**. The tree landed on it with a clean
-cherry-pick (no conflict), so `serve_api.py` in this directory is the
-0.11.4-merged file now running. `pristine-0.11.1.py` stays as the merge
-base the rebase tool needs; it is deliberately not bumped per release.
+Current deployment: **0.11.4**. The tree was rebased onto it with a clean
+cherry-pick, and the merge base was then bumped from 0.11.1 to 0.11.4 so the
+patch stays "my changes only" going forward.
 
 ## What it records
 
@@ -56,6 +57,23 @@ year/month dropdowns:
 APIs: `/api/report/usage?unit=hour|day&year=YYYY&month=M`,
 `/api/report/months`, `/api/report/logs?page=N&pageSize=N`,
 `/api/report/totals`.
+
+## Omitted output budget is clamped to the room
+
+Stock 0.11.4 fills an omitted `max_tokens` with the server default
+(262144) and returns **400** when `prompt + default` exceeds the context —
+so a ~950k-token prompt with no budget is refused even though the prompt
+itself fits. This copy marks whether the client actually sent a budget
+(`explicit_max`) and only shrinks it when the client did not:
+
+- omitted budget + default does not fit → accept, set the budget to
+  `context - prompt`. A default is the server's own number, not the
+  client's ask, so it must not turn a long-context request into an error.
+- **explicit** budget over the room → still a hard 400, never silently
+  clamped (a truncated reply and a model that stopped look identical).
+
+Verified live: an 850k-token prompt with no budget returns 200; the same
+prompt with `max_output_tokens: 262144` still returns the 400.
 
 ## Deploy (current shape)
 
@@ -88,7 +106,7 @@ sudo python3 rebase_report.py ghcr.io/peonist-ai/halogen-flash-server:<NEW>
 The script:
 - extracts the pristine `serve_api.py` from the NEW image (throwaway
   container, never runs it),
-- 3-way merges my feature commit onto it (base = `pristine-0.11.1.py`),
+- 3-way merges my feature commit onto it (base = `pristine-0.11.4.py`),
 - auto-resolves the one known conflict shape (a new param added to
   `serve()`'s signature — keeps upstream's signature, keeps my block),
 - gates on: no leftover conflict markers, valid Python AST, feature markers
@@ -105,7 +123,7 @@ present, AST OK.
 
 Upstream moved a region I touch. Open the printed conflict, keep upstream's
 lines and re-add my block below them, then re-run. The merge base is
-`pristine-0.11.1.py` so `git diff` shows exactly what I changed.
+`pristine-0.11.4.py` so `git diff` shows exactly what I changed.
 
 ### Rollback
 
