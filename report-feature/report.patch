@@ -1,8 +1,16 @@
 diff --git a/tools/serve_api.py b/tools/serve_api.py
-index 7bc4419..42e4dd3 100644
+index 7bc4419..5253cb9 100644
 --- a/tools/serve_api.py
 +++ b/tools/serve_api.py
-@@ -579,6 +579,353 @@ class Metrics:
+@@ -21,6 +21,7 @@ import argparse
+ import asyncio
+ import base64
+ import binascii
++import calendar
+ import io
+ import math
+ import itertools
+@@ -579,6 +580,410 @@ class Metrics:
          return "\n".join(out) + "\n"
  
  
@@ -18,47 +26,33 @@ index 7bc4419..42e4dd3 100644
 +TZ_OFFSET_H = float(os.environ.get("HALOGEN_TZ_OFFSET", "8"))
 +
 +
++def _local(ts):
++    return time.gmtime(float(ts) + TZ_OFFSET_H * 3600.0)
++
++
 +def _label(ts, unit):
-+    lt = time.gmtime(float(ts) + TZ_OFFSET_H * 3600.0)
++    lt = _local(ts)
 +    if unit == "hour":
-+        return time.strftime("%m-%d %H:00", lt)
-+    if unit == "week":
-+        return time.strftime("%G-W%V", lt)
-+    if unit == "month":
-+        return time.strftime("%Y-%m", lt)
-+    # day: no year on the axis. A rotated "2026-08-19" gets its left edge
-+    # (the year) clipped by the canvas boundary, leaving a stray leading
-+    # "-08-19". The year is redundant on a 30-day window; it lives in the
-+    # chart title instead.
++        return time.strftime("%H:00", lt)
++    # day: no year on the axis. A rotated full date gets its left edge (the
++    # year) clipped by the canvas boundary, leaving a stray leading hyphen;
++    # the period lives in the chart title instead.
 +    return time.strftime("%m-%d", lt)
 +
 +
-+def _bucket_labels(unit, count):
-+    now = time.time() + TZ_OFFSET_H * 3600.0
-+    labels = []
-+    if unit == "hour":
-+        base = int(now // 3600)
-+        labels = [time.strftime("%m-%d %H:00", time.gmtime((base - i) * 3600))
-+                 for i in range(count - 1, -1, -1)]
-+    elif unit == "week":
-+        day = int(now // 86400)
-+        monday = day - ((day + 3) % 7)
-+        labels = [time.strftime("%G-W%V", time.gmtime((monday - i * 7) * 86400))
-+                 for i in range(count - 1, -1, -1)]
-+    elif unit == "month":
-+        lt = time.gmtime(now)
-+        y, m = lt.tm_year, lt.tm_mon
-+        for i in range(count - 1, -1, -1):
-+            yy, mm = y, m - i
-+            while mm <= 0:
-+                mm += 12
-+                yy -= 1
-+            labels.append("%04d-%02d" % (yy, mm))
-+    else:
-+        base = int(now // 86400)
-+        labels = [time.strftime("%m-%d", time.gmtime((base - i) * 86400))
-+                 for i in range(count - 1, -1, -1)]
-+    return labels
++def _month_days(year, month):
++    return calendar.monthrange(year, month)[1]
++
++
++def _anchor_day(year, month):
++    """The day the hourly view is pinned to: the last day of the selected
++    month, except for the current month, where it is today (the month's last
++    day is in the future and would render as an all-zero day)."""
++    lt = _local(time.time())
++    n = _month_days(year, month)
++    if lt.tm_year == year and lt.tm_mon == month:
++        return min(n, lt.tm_mday)
++    return n
 +
 +
 +class RequestLedger:
@@ -116,20 +110,65 @@ index 7bc4419..42e4dd3 100644
 +                pass
 +        return recs
 +
-+    def usage(self, unit, count):
++    def usage(self, unit, year, month):
++        """One period, two views:
++        unit=day  -> every day of (year, month); for the current month the
++                     series stops at today, so no future all-zero bars.
++        unit=hour -> the 24 hours of `_anchor_day`, the month's last day (or
++                     today, when the month is the current one)."""
 +        empty = {"requests": 0, "prompt": 0, "cached": 0, "output": 0,
 +                 "draft": 0, "draft_accepted": 0}
++        if unit == "hour":
++            anchor = _anchor_day(year, month)
++            labels = ["%02d:00" % h for h in range(24)]
++
++            def in_period(lt):
++                return (lt.tm_year == year and lt.tm_mon == month
++                        and lt.tm_mday == anchor)
++        else:
++            anchor = None
++            nd = _month_days(year, month)
++            lt = _local(time.time())
++            if lt.tm_year == year and lt.tm_mon == month:
++                nd = min(nd, lt.tm_mday)
++            labels = ["%02d-%02d" % (month, d) for d in range(1, nd + 1)]
++
++            def in_period(lt):
++                return lt.tm_year == year and lt.tm_mon == month
 +        buckets = {}
++        totals = dict(empty)
 +        for r in self._load():
++            lt = _local(r.get("ts", 0))
++            if not in_period(lt):
++                continue
 +            lab = _label(r.get("ts", 0), unit)
 +            b = buckets.setdefault(lab, dict(empty, label=lab))
++            for k, src in (("prompt", "prompt_tokens"),
++                           ("cached", "cached_tokens"),
++                           ("output", "output_tokens"),
++                           ("draft", "draft_n"),
++                           ("draft_accepted", "draft_n_accepted")):
++                v = int(r.get(src, 0))
++                b[k] += v
++                totals[k] += v
 +            b["requests"] += 1
-+            b["prompt"] += int(r.get("prompt_tokens", 0))
-+            b["cached"] += int(r.get("cached_tokens", 0))
-+            b["output"] += int(r.get("output_tokens", 0))
-+            b["draft"] += int(r.get("draft_n", 0))
-+            b["draft_accepted"] += int(r.get("draft_n_accepted", 0))
-+        return [buckets.get(l, dict(empty, label=l)) for l in _bucket_labels(unit, count)]
++            totals["requests"] += 1
++        return {"unit": unit, "year": year, "month": month,
++                "anchorDay": anchor,
++                "data": [buckets.get(l, dict(empty, label=l)) for l in labels],
++                "totals": totals}
++
++    def months(self):
++        """(year, month) pairs present in the ledger, plus the current month,
++        newest first — the two period dropdowns are built from this."""
++        seen = set()
++        for r in self._load():
++            lt = _local(r.get("ts", 0))
++            seen.add((lt.tm_year, lt.tm_mon))
++        lt = _local(time.time())
++        seen.add((lt.tm_year, lt.tm_mon))
++        return sorted(({"year": y, "month": m} for y, m in seen),
++                      key=lambda x: (x["year"], x["month"]), reverse=True)
 +
 +    def logs(self, page, page_size):
 +        recs = sorted(self._load(), key=lambda r: r.get("ts", 0), reverse=True)
@@ -198,6 +237,8 @@ index 7bc4419..42e4dd3 100644
 +.units{display:flex;gap:4px;}
 +.units button{padding:5px 10px;border:1px solid var(--border);border-radius:6px;background:transparent;color:var(--muted);font-size:12px;cursor:pointer;font-family:inherit;}
 +.units button.active{background:var(--accent);border-color:var(--accent);color:#fff;}
++.period{display:flex;gap:6px;}
++.period select{padding:5px 8px;border:1px solid var(--border);border-radius:6px;background:var(--card);color:var(--fg);font-size:12px;font-family:inherit;}
 +canvas{width:100%;height:300px;display:block;}
 +.legend{display:flex;gap:16px;margin-top:8px;font-size:12px;color:var(--muted);flex-wrap:wrap;}
 +.legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:middle;}
@@ -230,8 +271,10 @@ index 7bc4419..42e4dd3 100644
 +        <div class="units" id="units">
 +          <button data-u="hour" onclick="setUnit('hour')">按小时</button>
 +          <button data-u="day" class="active" onclick="setUnit('day')">按日</button>
-+          <button data-u="week" onclick="setUnit('week')">按周</button>
-+          <button data-u="month" onclick="setUnit('month')">按月</button>
++        </div>
++        <div class="period">
++          <select id="yearSel" onchange="onYear()"></select>
++          <select id="monthSel" onchange="loadUsage()"></select>
 +        </div>
 +      </div>
 +      <canvas id="cv"></canvas>
@@ -265,29 +308,51 @@ index 7bc4419..42e4dd3 100644
 +  </div>
 +</div>
 +<script>
-+let unit='day', page=1, pages=1;
++let unit='day', page=1, pages=1, months=[], curRows=[];
 +function fmt(n){n=n||0;if(n>=1e9)return (n/1e9).toFixed(2)+'B';if(n>=1e6)return (n/1e6).toFixed(2)+'M';if(n>=1e3)return (n/1e3).toFixed(1)+'K';return ''+n;}
 +function esc(s){return (''+(s==null?'':s)).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
 +function go(t){document.querySelectorAll('.tabs button').forEach(b=>b.classList.toggle('active',b.dataset.tab===t));document.querySelectorAll('.panel').forEach(p=>p.classList.toggle('active',p.id==='panel-'+t));if(t==='log')loadLogs();}
-+function setUnit(u){unit=u;document.querySelectorAll('#units button').forEach(b=>b.classList.toggle('active',b.dataset.u===u));const nm={hour:'按小时',day:'按日',week:'按周',month:'按月'}[u];document.getElementById('chartTitle').textContent=nm+'统计';loadUsage();}
++function setUnit(u){unit=u;document.querySelectorAll('#units button').forEach(b=>b.classList.toggle('active',b.dataset.u===u));loadUsage();}
 +async function jget(u){const r=await fetch(u);return r.json();}
-+async function loadTotals(){
-+  try{const d=(await jget('/api/report/totals')).data||{};
-+    const hr=d.hit_rate!=null?(d.hit_rate*100).toFixed(1)+'%':'—';
-+    document.getElementById('cards').innerHTML=
-+      card('总请求',fmt(d.requests))+
-+      card('总输入 Token',fmt(d.prompt))+
-+      card('总命中缓存',fmt(d.cached),'小')+
-+      card('缓存命中率',hr)+
-+      card('总输出 Token',fmt(d.output))+
-+      card('草稿接受',fmt(d.draft_accepted)+' / '+fmt(d.draft));
-+  }catch(e){document.getElementById('cards').innerHTML='<div class="err">汇总加载失败: '+esc(e.message)+'</div>';}
-+}
 +function card(k,v,s){return '<div class="card"><div class="k">'+k+'</div><div class="v">'+v+(s?'<small>'+s+'</small>':'')+'</div></div>';}
++async function loadMonths(){
++  let d=[];try{d=(await jget('/api/report/months')).data||[];}catch(e){}
++  months=d;
++  const ys=[...new Set(months.map(m=>m.year))];
++  const ysel=document.getElementById('yearSel');
++  ysel.innerHTML=ys.map(y=>'<option value="'+y+'">'+y+'年</option>').join('');
++  if(ys.length)ysel.value=ys[0];
++  onYear();
++}
++function onYear(){
++  const y=+document.getElementById('yearSel').value;
++  const ms=months.filter(m=>m.year===y).map(m=>m.month).sort((a,b)=>b-a);
++  const msel=document.getElementById('monthSel');
++  msel.innerHTML=ms.map(m=>'<option value="'+m+'">'+m+'月</option>').join('');
++  if(ms.length)msel.value=ms[0];
++  loadUsage();
++}
 +async function loadUsage(){
-+  const cnt={hour:48,day:30,week:12,month:12}[unit];
-+  let d=[];try{d=(await jget('/api/report/usage?unit='+unit+'&count='+cnt)).data||[];}catch(e){d=[];}
-+  drawChart(d);
++  const y=+document.getElementById('yearSel').value||new Date().getFullYear();
++  const m=+document.getElementById('monthSel').value||(new Date().getMonth()+1);
++  let r=null;try{r=await jget('/api/report/usage?unit='+unit+'&year='+y+'&month='+m);}catch(e){}
++  const rows=(r&&r.data)||[];
++  curRows=rows;
++  const t=(r&&r.totals)||{};
++  const hr=t.prompt?((t.cached/t.prompt)*100).toFixed(1)+'%':'—';
++  document.getElementById('cards').innerHTML=
++    card('请求数',fmt(t.requests))+
++    card('总输入 Token',fmt(t.prompt))+
++    card('总命中缓存',fmt(t.cached))+
++    card('缓存命中率',hr)+
++    card('总输出 Token',fmt(t.output))+
++    card('草稿接受',fmt(t.draft_accepted)+' / '+fmt(t.draft));
++  const ym=y+'-'+String(m).padStart(2,'0');
++  const sub=(unit==='hour')
++    ? (ym+'-'+String((r&&r.anchorDay)||'').padStart(2,'0')+' · 24小时')
++    : (ym+' · 每日');
++  document.getElementById('chartTitle').textContent={hour:'按小时',day:'按日'}[unit]+'统计 · '+sub;
++  drawChart(rows);
 +}
 +function drawChart(rows){
 +  const cv=document.getElementById('cv');const dpr=window.devicePixelRatio||1;
@@ -345,8 +410,8 @@ index 7bc4419..42e4dd3 100644
 +  document.getElementById('next').disabled=page>=pages;
 +}
 +function pg(d){page=Math.max(1,Math.min(pages,page+d));loadLogs();}
-+window.addEventListener('resize',()=>{if(document.getElementById('panel-sum').classList.contains('active'))loadUsage();});
-+loadTotals();loadUsage();
++window.addEventListener('resize',()=>{if(document.getElementById('panel-sum').classList.contains('active'))drawChart(curRows);});
++loadMonths();
 +</script>
 +</body>
 +</html>
@@ -356,7 +421,7 @@ index 7bc4419..42e4dd3 100644
  class EngineBusy(HTTPException):
      def __init__(self):
          super().__init__(status_code=503,
-@@ -2479,7 +2826,7 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
+@@ -2479,7 +2884,7 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
  
      async def run(ids, max_tokens, stops, drafter=None, sample=None,
                    penalty="", snap=0, snap2=0, images=None, schema=None,
@@ -365,7 +430,7 @@ index 7bc4419..42e4dd3 100644
          """Drives the engine and incrementally detokenizes.
  
          Public issue #13, reported with measurements and a patch by
-@@ -2553,6 +2900,8 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
+@@ -2553,6 +2958,8 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
                  done = d
                  if d.get("reason") != "error":
                      engine.metrics.record(timings(d), structured=bool(schema))
@@ -374,7 +439,7 @@ index 7bc4419..42e4dd3 100644
                  # The serving ledger an earlier change asked for: what real traffic
                  # actually commits per round, not what a fixture does.
                  # an earlier change: this WAS guarded by `if d.get("rounds")`, i.e. it
-@@ -3658,6 +4007,33 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
+@@ -3658,6 +4065,38 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
          st["hit_rate"] = round(st["hits"] / total, 4) if total else None
          return st
  
@@ -385,11 +450,16 @@ index 7bc4419..42e4dd3 100644
 +    # ledger; nothing here measures the engine.
 +    # ------------------------------------------------------------------
 +    @app.get("/api/report/usage")
-+    async def report_usage(unit: str = "day", count: int = 30):
-+        unit = unit if unit in ("hour", "day", "week", "month") else "day"
-+        count = max(1, min(count, 24 * 60))
-+        return {"success": True, "unit": unit, "count": count,
-+                "data": engine.ledger.usage(unit, count)}
++    async def report_usage(unit: str = "day", year: int = 0, month: int = 0):
++        unit = unit if unit in ("hour", "day") else "day"
++        lt = _local(time.time())
++        year = year if 2000 <= year <= 2100 else lt.tm_year
++        month = month if 1 <= month <= 12 else lt.tm_mon
++        return {"success": True, **engine.ledger.usage(unit, year, month)}
++
++    @app.get("/api/report/months")
++    async def report_months():
++        return {"success": True, "data": engine.ledger.months()}
 +
 +    @app.get("/api/report/logs")
 +    async def report_logs(page: int = 1, pageSize: int = 30):
@@ -408,7 +478,7 @@ index 7bc4419..42e4dd3 100644
      @app.get("/v1/models")
      async def models():
          return {"object": "list",
-@@ -3834,6 +4210,30 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
+@@ -3834,6 +4273,30 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
                      snap2=0, wire="chat", images=None, want_summary=False,
                      schema=None, think_budget=None, seg=None,
                      http_request=None):
@@ -439,7 +509,7 @@ index 7bc4419..42e4dd3 100644
          # 0.8.0: the schema rides the GEN line; the engine constrains
          # only after the thinking block (the </think> token, when the request
          # thinks) and lets a request with tools open a tool call instead of
-@@ -3951,7 +4351,7 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
+@@ -3951,7 +4414,7 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
                  try:
                      gen = guarded(run(ids, max_tokens, stops, drafter, sample,
                                        penalty, snap, snap2, images, schema,
@@ -448,7 +518,7 @@ index 7bc4419..42e4dd3 100644
                      # The Responses wire is a different SERIALIZATION of the
                      # same generation. Everything that matters for safety --
                      # the slot semaphore, the abort on hangup, the inflight
-@@ -4042,7 +4442,7 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
+@@ -4042,7 +4505,7 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
              # generator is closed exactly as the streaming arm's is, which is
              # what sends the abort, and the reply nobody reads is a 499.
              gen = run(ids, max_tokens, stops, drafter, sample, penalty, snap,
@@ -457,7 +527,7 @@ index 7bc4419..42e4dd3 100644
              gone, n_tok = False, 0
              try:
                  async for delta, d in gen:
-@@ -4375,6 +4775,10 @@ def main():
+@@ -4375,6 +4838,10 @@ def main():
                "will be refused", flush=True)
      host, _, port = args.engine.partition(":")
      engine = Engine(host, int(port))

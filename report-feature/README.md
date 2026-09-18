@@ -39,8 +39,18 @@ predicted_per_second, draft_n, draft_n_accepted, structured, elapsed_ms`
 Ledger: `/models/halogen-usage.jsonl` (override `HALOGEN_LEDGER`).
 Bucket timezone: `HALOGEN_TZ_OFFSET` hours, default `8`.
 Page: `http://10.10.0.111:8731/report`
-APIs: `/api/report/usage?unit=hour|day|week|month&count=N`,
-`/api/report/logs?page=N&pageSize=N`, `/api/report/totals`.
+
+The page is a month browser. Two views, one period each, chosen with the
+year/month dropdowns:
+- **按日** — every day of the selected month; for the current month the
+  series stops at today so there are no future all-zero bars.
+- **按小时** — the 24 hours of the selected month's last day (today, when
+  the month is the current one), because the month's real last day is in
+  the future then.
+
+APIs: `/api/report/usage?unit=hour|day&year=YYYY&month=M`,
+`/api/report/months`, `/api/report/logs?page=N&pageSize=N`,
+`/api/report/totals`.
 
 ## Deploy (current shape)
 
