@@ -31,10 +31,10 @@ FEATURE_COMMIT_MSG = "FEATURE: /report usage dashboard"
 PATCH = os.environ.get("REPORT_PATCH", "/home/james/halogen-serve/report.patch")
 # The pristine front-end this patch was written against. It is the merge
 # base: the 3-way merge needs it to tell "my change" from "upstream's
-# change". Bumped to the running image (0.11.4) when the deployment was
+# change". Bumped to the running image (0.11.9) when the deployment was
 # rebased onto it. Saved alongside the patch so the rebase never depends on
 # the running container.
-BASE_PRISTINE = os.environ.get("REPORT_BASE", "/home/james/halogen-serve/pristine-0.11.4.py")
+BASE_PRISTINE = os.environ.get("REPORT_BASE", "/home/james/halogen-serve/pristine-0.11.9.py")
 STAGE = "/home/james/halogen-serve/serve_api.py"
 MOUNT = f"{STAGE}:/halogen/tools/serve_api.py:ro"
 
