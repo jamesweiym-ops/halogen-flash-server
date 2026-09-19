@@ -59,6 +59,29 @@ APIs: `/api/report/usage?unit=hour|day&year=YYYY&month=M`,
 `/api/report/months`, `/api/report/logs?page=N&pageSize=N`,
 `/api/report/totals`.
 
+## /pulse — request-level dashboard (HALO-PULSE style)
+
+A second page, `GET /pulse`, modeled on the community "HALO PULSE" board:
+per-request scatter/lines instead of day/month aggregation. Backed by
+`GET /api/pulse?window=5m|15m|30m|1h|3h|6h|12h|24h`.
+
+- **每请求 DECODE 散点** — X=真实时间, Y=t/s, 点大小=输出 tok 数.
+- **每请求 PREFILL t/s**, **每请求缓存命中 %**, **MTP commit/round**,
+  **Prompt 规模 tokens** — per-request line charts.
+- **KV 池占用时间线** — a 15s sampler (`_pool_sampler` in startup) reads
+  `cache_stats()`'s `pool` block into a 5760-point ring (24h).
+- **请求明细** — newest-first table.
+- Summary cards: 请求数 / DECODE 均值 / DECODE P50 / PREFILL 加权 /
+  缓存命中 / MTP commit / 输出总量 / 忙碌时长.
+
+"空间不稀释": rates are each request's own tok÷dur (and PREFILL is the
+window's Σtokens÷Σseconds), not a lifetime average — the same honest
+口径 the community board uses. The ledger now also stores `rounds` and
+`commit` per request so the MTP commit/round chart is exact.
+
+The ledger keeps an in-memory ring (`recent`, 20k) seeded at startup so the
+15s auto-refresh never re-reads the file.
+
 ## Omitted output budget is clamped to the room
 
 Stock 0.11.4 fills an omitted `max_tokens` with the server default
