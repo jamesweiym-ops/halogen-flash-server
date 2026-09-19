@@ -31,6 +31,7 @@ import random
 import sys
 import time
 import uuid
+from collections import deque
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
@@ -639,6 +640,17 @@ class RequestLedger:
 
     def __init__(self, path):
         self.path = path
+        # In-memory ring of recent records so the pulse dashboard's 15s
+        # refresh never re-reads the (up to 64 MB) file. Seeded from disk
+        # once at startup by load_recent().
+        self.recent = deque(maxlen=20000)
+
+    def load_recent(self):
+        try:
+            for r in self._load():
+                self.recent.append(r)
+        except Exception:
+            pass
 
     def record(self, ctx, t, d):
         try:
@@ -659,6 +671,8 @@ class RequestLedger:
                 "predicted_per_second": t.get("predicted_per_second", 0.0),
                 "draft_n": int(t.get("draft_n", 0)),
                 "draft_n_accepted": int(t.get("draft_n_accepted", 0)),
+                "rounds": int(d.get("rounds", 0)),
+                "commit": int(d.get("commit", 0)),
                 "structured": bool(ctx.get("structured")),
                 "elapsed_ms": round((now - float(ctx.get("t_start", now))) * 1000, 1),
             }
@@ -669,6 +683,7 @@ class RequestLedger:
                 pass
             with open(self.path, "a") as f:
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            self.recent.append(rec)
         except Exception:
             pass
 
@@ -991,6 +1006,167 @@ async function loadLogs(){
 function pg(d){page=Math.max(1,Math.min(pages,page+d));loadLogs();}
 window.addEventListener('resize',()=>{if(document.getElementById('panel-sum').classList.contains('active'))drawChart(curRows);});
 loadMonths();
+</script>
+</body>
+</html>
+"""
+
+
+PULSE_HTML = """<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HALO PULSE · halogen 请求级看板</title>
+<style>
+:root{--bg:#080a10;--card:#11141c;--card2:#0d1017;--border:#222838;--fg:#e5e7eb;--muted:#8b95a7;--orange:#f97316;--blue:#3b82f6;--green:#22c55e;--yellow:#eab308;--purple:#a855f7;--cyan:#22d3ee;}
+*{box-sizing:border-box;}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;}
+.wrap{max-width:1180px;margin:0 auto;padding:14px;}
+.head{display:flex;align-items:center;gap:10px;margin:6px 0 12px;}
+.head h1{font-size:19px;margin:0;font-weight:800;letter-spacing:.3px;}
+.badge{width:26px;height:26px;border-radius:7px;background:var(--orange);color:#0a0a0a;font-weight:900;display:flex;align-items:center;justify-content:center;}
+.live{margin-left:auto;font-size:12px;color:var(--green);display:flex;align-items:center;gap:6px;}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--green);box-shadow:0 0 8px var(--green);animation:p 1.6s infinite;}
+@keyframes p{0%,100%{opacity:1}50%{opacity:.3}}
+.sub{color:var(--muted);font-size:12px;margin:-8px 0 12px;}
+.chips{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px;}
+.chips button{padding:6px 12px;border:1px solid var(--border);border-radius:16px;background:transparent;color:var(--muted);font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;}
+.chips button.active{background:var(--orange);border-color:var(--orange);color:#0a0a0a;}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px;margin-bottom:12px;}
+.card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:10px 12px;}
+.card .k{color:var(--muted);font-size:11px;margin-bottom:3px;text-transform:uppercase;letter-spacing:.4px;}
+.card .v{font-size:20px;font-weight:800;}
+.card .v small{font-size:11px;color:var(--muted);font-weight:500;margin-left:3px;}
+.card .n{font-size:10px;color:var(--muted);margin-top:2px;}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;}
+.panel{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:12px;}
+.panel.full{grid-column:1 / -1;}
+.pt{font-size:12px;font-weight:700;margin-bottom:8px;color:var(--fg);}
+.pt span{color:var(--muted);font-weight:500;}
+canvas{width:100%;display:block;}
+table{width:100%;border-collapse:collapse;font-size:11.5px;}
+th,td{padding:5px 6px;text-align:right;border-bottom:1px solid var(--border);white-space:nowrap;}
+th{color:var(--muted);font-weight:600;position:sticky;top:0;background:var(--card);}
+td:first-child,th:first-child{text-align:left;}
+.scroll{max-height:340px;overflow:auto;border-radius:8px;}
+.ep{padding:1px 5px;border-radius:4px;font-size:10px;background:rgba(34,211,238,.12);color:var(--cyan);}
+.foot{color:var(--muted);font-size:11px;text-align:center;margin:14px 0 4px;}
+.err{color:#f87171;padding:16px;text-align:center;}
+@media(max-width:760px){.grid{grid-template-columns:1fr;}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="head">
+    <div class="badge">H</div>
+    <h1>HALO PULSE · halogen 请求级看板</h1>
+    <div class="live"><span class="dot"></span><span id="liveTxt">LIVE</span></div>
+  </div>
+  <div class="sub">halogen-flash-server · Qwen3.8-Flash-Next · 请求级真实测量（tok÷dur，空间不稀释）</div>
+  <div class="chips" id="chips"></div>
+  <div class="cards" id="cards"></div>
+  <div class="grid">
+    <div class="panel full">
+      <div class="pt">每请求 DECODE 散点 <span>· X=真实时间 Y=t/s · 点大小=输出tok数</span></div>
+      <canvas id="cDec" height="220"></canvas>
+    </div>
+    <div class="panel">
+      <div class="pt">每请求 PREFILL t/s</div>
+      <canvas id="cPre" height="180"></canvas>
+    </div>
+    <div class="panel">
+      <div class="pt">每请求缓存命中 %</div>
+      <canvas id="cHit" height="180"></canvas>
+    </div>
+    <div class="panel">
+      <div class="pt">MTP commit /round 投机接受</div>
+      <canvas id="cCmt" height="180"></canvas>
+    </div>
+    <div class="panel">
+      <div class="pt">Prompt 规模 tokens 上下文增长</div>
+      <canvas id="cPrm" height="180"></canvas>
+    </div>
+    <div class="panel full">
+      <div class="pt" id="kvTitle">KV 池占用时间线</div>
+      <div style="height:6px;border-radius:3px;background:linear-gradient(90deg,#22c55e,#eab308,#ef4444);margin:2px 0 8px;"></div>
+      <canvas id="cKV" height="150"></canvas>
+    </div>
+    <div class="panel full">
+      <div class="pt">请求明细 <span>（窗口内全部，最新在上）</span></div>
+      <div class="scroll"><table>
+        <thead><tr><th>时间</th><th>端点</th><th>输出tok</th><th>耗时s</th><th>decode</th><th>prompt</th><th>命中%</th><th>pp</th><th>commit</th></tr></thead>
+        <tbody id="logBody"></tbody>
+      </table></div>
+    </div>
+  </div>
+  <div class="foot">数据源：引擎 serve_api 逐请求测量 + 15s 池采样 · <a href="/report" style="color:var(--muted)">聚合报表 /report</a></div>
+</div>
+<script>
+let win='1h', timer=null;
+const WINS=['5m','15m','30m','1h','3h','6h','12h','24h'];
+function fmt(n){n=n||0;if(n>=1e6)return (n/1e6).toFixed(2)+'M';if(n>=1e3)return (n/1e3).toFixed(1)+'K';return ''+Math.round(n);}
+function esc(s){return (''+(s==null?'':s)).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+function hm(ts){const d=new Date((ts+8*3600)*1000);return d.toISOString().substr(11,5);}
+async function jget(u){const r=await fetch(u);return r.json();}
+function setup(cv){const dpr=window.devicePixelRatio||1;const w=cv.clientWidth;const h=+cv.getAttribute('height');cv.width=w*dpr;cv.height=h*dpr;const c=cv.getContext('2d');c.setTransform(dpr,0,0,dpr,0,0);c.clearRect(0,0,w,h);return [c,w,h];}
+function axes(c,w,h,pad){c.strokeStyle='#1c2230';c.lineWidth=1;c.beginPath();c.moveTo(pad.l,pad.t);c.lineTo(pad.l,h-pad.b);c.lineTo(w-pad.r,h-pad.b);c.stroke();}
+function ylab(c,pad,maxv){c.fillStyle='#8b95a7';c.font='10px sans-serif';c.textAlign='right';for(let g=0;g<=4;g++){const y=pad.t+(pad.ch)*g/4;const v=maxv*(1-g/4);c.fillText(fmt(v),pad.l-4,y+3);c.strokeStyle='#161b26';c.beginPath();c.moveTo(pad.l,y);c.lineTo(pad.l+pad.cw,y);c.stroke();}}
+function xlab(c,pad,ts0,ts1){c.fillStyle='#8b95a7';c.font='10px sans-serif';c.textAlign='center';for(let g=0;g<=5;g++){const t=ts0+(ts1-ts0)*g/5;const x=pad.l+pad.cw*g/5;c.fillText(hm(t),x,pad.t+pad.ch+14);}}
+function line(c,pts,color,wid){if(pts.length<2)return;c.strokeStyle=color;c.lineWidth=wid||1.6;c.beginPath();pts.forEach((p,i)=>{i?c.lineTo(p[0],p[1]):c.moveTo(p[0],p[1]);});c.stroke();}
+function drawScatter(cv,reqs,key,color,sizeKey){const [c,w,h]=setup(cv);const pad={l:42,r:12,t:12,b:26};pad.ch=h-pad.t-pad.b;pad.cw=w-pad.l-pad.r;
+  const ts=reqs.map(r=>r.ts);const t0=Math.min(...ts),t1=Math.max(...ts);const vals=reqs.map(r=>r[key]||0);const mx=Math.max(1,...vals);
+  axes(c,w,h,pad);ylab(c,pad,mx);xlab(c,pad,t0,t1);
+  const maxS=Math.max(1,...reqs.map(r=>r[sizeKey]||1));
+  reqs.forEach(r=>{const x=pad.l+pad.cw*((r.ts-t0)/((t1-t0)||1));const y=pad.t+pad.ch*(1-(r[key]||0)/mx);const rad=2+4*Math.sqrt((r[sizeKey]||1)/maxS);c.fillStyle=color;c.globalAlpha=.85;c.beginPath();c.arc(x,y,rad,0,7);c.fill();});
+  c.globalAlpha=1;}
+function drawLine(cv,reqs,key,color,ymax){const [c,w,h]=setup(cv);const pad={l:42,r:12,t:12,b:26};pad.ch=h-pad.t-pad.b;pad.cw=w-pad.l-pad.r;
+  const ts=reqs.map(r=>r.ts);const t0=Math.min(...ts),t1=Math.max(...ts);const vals=reqs.map(r=>r[key]||0);const mx=ymax||Math.max(1,...vals);
+  axes(c,w,h,pad);ylab(c,pad,mx);xlab(c,pad,t0,t1);
+  const pts=reqs.map(r=>[pad.l+pad.cw*((r.ts-t0)/((t1-t0)||1)),pad.t+pad.ch*(1-(r[key]||0)/mx)]);
+  line(c,pts,color,1.6);
+  c.fillStyle=color;pts.forEach(p=>{c.beginPath();c.arc(p[0],p[1],1.8,0,7);c.fill();});}
+function drawKV(pool){const [c,w,h]=setup(document.getElementById('cKV'));const pad={l:42,r:12,t:12,b:26};pad.ch=h-pad.t-pad.b;pad.cw=w-pad.l-pad.r;
+  if(!pool.length){c.fillStyle='#8b95a7';c.fillText('暂无池采样',pad.l+6,pad.t+16);return;}
+  const ts=pool.map(p=>p[0]);const t0=Math.min(...ts),t1=Math.max(...ts);
+  const pos=pool.map(p=>p[2]||1);const used=pool.map(p=>p[1]||0);
+  const mx=Math.max(...pos);
+  axes(c,w,h,pad);ylab(c,pad,mx);xlab(c,pad,t0,t1);
+  const pts=pool.map(p=>[pad.l+pad.cw*((p[0]-t0)/((t1-t0)||1)),pad.t+pad.ch*(1-(p[1]||0)/mx)]);
+  c.fillStyle='rgba(168,85,247,.12)';c.beginPath();c.moveTo(pts[0][0],pad.t+pad.ch);pts.forEach(p=>c.lineTo(p[0],p[1]));c.lineTo(pts[pts.length-1][0],pad.t+pad.ch);c.closePath();c.fill();
+  line(c,pts,'#a855f7',1.6);
+  const cur=pool[pool.length-1];const pct=(cur[1]/(cur[2]||1)*100).toFixed(1);
+  document.getElementById('kvTitle').innerHTML='KV 池占用时间线 <span>'+fmt(cur[1])+' / '+fmt(cur[2])+' · 当前 '+pct+'%</span>';}
+function renderCards(s){const hr=s.hit_rate.toFixed(1)+'%';document.getElementById('cards').innerHTML=
+  card('请求数',s.requests,'窗口内完成')+
+  card('DECODE 均值',s.decode_mean,'t/s','每请求 tok÷dur')+
+  card('DECODE P50',s.decode_p50,'t/s','中位数')+
+  card('PREFILL 加权',s.prefill_w,'t/s','Σtok÷Σ秒')+
+  card('缓存命中',hr,'')+
+  card('MTP commit',s.commit_round,'/round','投机接受')+
+  card('输出总量',s.out_tokens,'tok','累计生成')+
+  card('忙碌时长',s.busy_s,'s','引擎干活时间');}
+function card(k,v,u,n){return '<div class="card"><div class="k">'+k+'</div><div class="v">'+v+(u?'<small>'+u+'</small>':'')+'</div>'+(n?'<div class="n">'+n+'</div>':'')+'</div>';}
+function renderTable(reqs){const tb=document.getElementById('logBody');const rs=reqs.slice().sort((a,b)=>b.ts-a.ts).slice(0,200);
+  if(!rs.length){tb.innerHTML='<tr><td colspan="9" style="text-align:center;color:#8b95a7;padding:18px">窗口内无请求</td></tr>';return;}
+  tb.innerHTML=rs.map(r=>{const dur=((r.prefill_ms||0)+(r.decode_ms||0))/1000;const hit=r.prompt_tokens?((r.cached_tokens/r.prompt_tokens)*100).toFixed(1):'0';const cmt=r.rounds?(r.commit/r.rounds).toFixed(2):'—';
+    return '<tr><td>'+hm(r.ts)+'</td><td><span class="ep">'+esc((r.endpoint||'').replace('/v1/',''))+'</span></td><td>'+fmt(r.output_tokens)+'</td><td>'+dur.toFixed(1)+'</td><td>'+(r.predicted_per_second||0).toFixed(1)+'</td><td>'+fmt(r.prompt_tokens)+'</td><td>'+hit+'</td><td>'+(r.prompt_per_second||0).toFixed(1)+'</td><td>'+cmt+'</td></tr>';}).join('');}
+async function load(){
+  let d;try{d=await jget('/api/pulse?window='+win);}catch(e){document.getElementById('cards').innerHTML='<div class="err">加载失败: '+esc(e.message)+'</div>';return;}
+  const reqs=d.requests||[];const pool=d.pool||[];const s=d.stats||{requests:0,decode_mean:0,decode_p50:0,prefill_w:0,hit_rate:0,commit_round:0,out_tokens:0,busy_s:0};
+  renderCards(s);
+  document.getElementById('liveTxt').textContent='LIVE '+new Date().toLocaleTimeString('zh-CN',{hour12:false})+' · '+d.count+' req';
+  if(!reqs.length){['cDec','cPre','cHit','cCmt','cPrm'].forEach(id=>{const [c,w,h]=setup(document.getElementById(id));c.fillStyle='#8b95a7';c.fillText('窗口内无请求',12,20);});drawKV(pool);renderTable([]);return;}
+  drawScatter(document.getElementById('cDec'),reqs,'predicted_per_second','#f97316','output_tokens');
+  drawLine(document.getElementById('cPre'),reqs,'prompt_per_second','#3b82f6');
+  drawLine(document.getElementById('cHit'),reqs.map(r=>({...r,hit:r.prompt_tokens?(r.cached_tokens/r.prompt_tokens*100):0})),'hit','#22c55e',100);
+  drawLine(document.getElementById('cCmt'),reqs.map(r=>({...r,cmt:r.rounds?(r.commit/r.rounds):0})),'cmt','#eab308');
+  drawLine(document.getElementById('cPrm'),reqs,'prompt_tokens','#a855f7');
+  drawKV(pool);renderTable(reqs);}
+function buildChips(){const el=document.getElementById('chips');el.innerHTML=WINS.map(w=>'<button data-w="'+w+'" class="'+(w===win?'active':'')+'" onclick="setWin(\\''+w+'\\')">'+w+'</button>').join('');}
+function setWin(w){win=w;buildChips();load();}
+window.addEventListener('resize',()=>{clearTimeout(window.__rz);window.__rz=setTimeout(load,200);});
+buildChips();load();timer=setInterval(load,15000);
 </script>
 </body>
 </html>
@@ -4256,6 +4432,48 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
     async def report_page():
         return Response(REPORT_HTML, media_type="text/html; charset=utf-8")
 
+    @app.get("/api/pulse")
+    async def pulse(window: str = "1h"):
+        """HALO-PULSE-style request-level feed: the raw per-request points in
+        the window (no aggregation, so a rate is that request's own tok/dur,
+        never diluted by the window), plus the 15s KV-pool history and the
+        window's summary stats."""
+        secs = {"5m": 300, "15m": 900, "30m": 1800, "1h": 3600,
+               "3h": 10800, "6h": 21600, "12h": 43200, "24h": 86400
+               }.get(window, 3600)
+        cutoff = time.time() - secs
+        reqs = [r for r in engine.ledger.recent if r.get("ts", 0) >= cutoff]
+        pool = [p for p in engine.pool_hist if p[0] >= cutoff]
+        n = len(reqs)
+        dec = sorted(r["predicted_per_second"] for r in reqs if r.get("predicted_per_second"))
+        # weighted prefill rate = total processed / total prefill seconds
+        proc = sum(max(0, r["prompt_tokens"] - r["cached_tokens"]) for r in reqs)
+        pms = sum(r.get("prefill_ms", 0.0) for r in reqs) / 1000.0
+        dms = sum(r.get("decode_ms", 0.0) for r in reqs) / 1000.0
+        gen = sum(r.get("output_tokens", 0) for r in reqs)
+        mean_dec = (gen / dms) if dms > 0 else 0.0
+        p50_dec = dec[len(dec)//2] if dec else 0.0
+        wpp = (proc / pms) if pms > 0 else 0.0
+        cached = sum(r.get("cached_tokens", 0) for r in reqs)
+        hit = (cached / proc) if proc > 0 else 0.0
+        rounds = sum(r.get("rounds", 0) for r in reqs)
+        commit = sum(r.get("commit", 0) for r in reqs)
+        cmt = (commit / rounds) if rounds > 0 else 0.0
+        return {"success": True, "window": window, "count": n,
+                "requests": reqs, "pool": pool,
+                "stats": {"requests": n,
+                          "decode_mean": round(mean_dec, 1),
+                          "decode_p50": round(p50_dec, 1),
+                          "prefill_w": round(wpp, 1),
+                          "hit_rate": round(hit * 100, 1),
+                          "commit_round": round(cmt, 2),
+                          "out_tokens": gen,
+                          "busy_s": round(dms, 1)}}
+
+    @app.get("/pulse")
+    async def pulse_page():
+        return Response(PULSE_HTML, media_type="text/html; charset=utf-8")
+
     @app.get("/v1/models")
     async def models():
         return {"object": "list",
@@ -5026,6 +5244,9 @@ def main():
     # the model bind-mount so the file survives the container being replaced.
     engine.ledger = RequestLedger(os.environ.get(
         "HALOGEN_LEDGER", "/models/halogen-usage.jsonl"))
+    engine.ledger.load_recent()
+    # 15s KV-pool history for the pulse dashboard: 24h at 15s = 5760 points.
+    engine.pool_hist = deque(maxlen=5760)
     app = build_app(tok, engine, args.context, args.max_tokens_cap,
                     args.queue_timeout)
 
@@ -5060,6 +5281,26 @@ def main():
                   f"may not know how to ask for (images, for one), and the "
                   f"answer may be wrong without any error saying so.",
                   flush=True)
+        # 15s KV-pool sampler for the pulse dashboard. cache_stats() takes
+        # the engine write lock and reads one CSTAT line, so it is safe to
+        # run alongside requests; a failure just skips that sample.
+        async def _pool_sampler():
+            while True:
+                try:
+                    st = await engine.cache_stats()
+                    if st:
+                        pl = st.get("pool") or {}
+                        engine.pool_hist.append((
+                            time.time(),
+                            int(pl.get("used", 0)),
+                            int(pl.get("positions", engine.info.get("kv_pool") or 0)),
+                            int(pl.get("busy_regions", 0)),
+                            int(pl.get("held_regions", 0)),
+                        ))
+                except Exception:
+                    pass
+                await asyncio.sleep(15)
+        asyncio.create_task(_pool_sampler())
 
     uvicorn.run(app, host=args.host, port=args.port, log_level="info",
                 timeout_keep_alive=KEEPALIVE_S)
