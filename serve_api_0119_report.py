@@ -1109,28 +1109,26 @@ function fmt(n){n=n||0;if(n>=1e6)return (n/1e6).toFixed(2)+'M';if(n>=1e3)return 
 function esc(s){return (''+(s==null?'':s)).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
 function hm(ts){const d=new Date((ts+8*3600)*1000);return d.toISOString().substr(11,5);}
 async function jget(u){const r=await fetch(u);return r.json();}
-function setup(cv){const dpr=window.devicePixelRatio||1;const w=cv.clientWidth;const h=+cv.getAttribute('height');cv.width=w*dpr;cv.height=h*dpr;const c=cv.getContext('2d');c.setTransform(dpr,0,0,dpr,0,0);c.clearRect(0,0,w,h);return [c,w,h];}
+function setup(cv){const dpr=window.devicePixelRatio||1;const w=cv.clientWidth||cv.offsetWidth||0;const h=+cv.getAttribute('height');if(w<=0)return null;cv.width=Math.round(w*dpr);cv.height=Math.round(h*dpr);const c=cv.getContext('2d');c.setTransform(dpr,0,0,dpr,0,0);c.clearRect(0,0,w,h);return [c,w,h];}
 function axes(c,w,h,pad){c.strokeStyle='#1c2230';c.lineWidth=1;c.beginPath();c.moveTo(pad.l,pad.t);c.lineTo(pad.l,h-pad.b);c.lineTo(w-pad.r,h-pad.b);c.stroke();}
 function ylab(c,pad,maxv){c.fillStyle='#8b95a7';c.font='10px sans-serif';c.textAlign='right';for(let g=0;g<=4;g++){const y=pad.t+(pad.ch)*g/4;const v=maxv*(1-g/4);c.fillText(fmt(v),pad.l-4,y+3);c.strokeStyle='#161b26';c.beginPath();c.moveTo(pad.l,y);c.lineTo(pad.l+pad.cw,y);c.stroke();}}
 function xlab(c,pad,ts0,ts1){c.fillStyle='#8b95a7';c.font='10px sans-serif';c.textAlign='center';for(let g=0;g<=5;g++){const t=ts0+(ts1-ts0)*g/5;const x=pad.l+pad.cw*g/5;c.fillText(hm(t),x,pad.t+pad.ch+14);}}
 function line(c,pts,color,wid){if(pts.length<2)return;c.strokeStyle=color;c.lineWidth=wid||1.6;c.beginPath();pts.forEach((p,i)=>{i?c.lineTo(p[0],p[1]):c.moveTo(p[0],p[1]);});c.stroke();}
-function drawScatter(cv,reqs,key,color,sizeKey){const [c,w,h]=setup(cv);const pad={l:42,r:12,t:12,b:26};pad.ch=h-pad.t-pad.b;pad.cw=w-pad.l-pad.r;
-  const ts=reqs.map(r=>r.ts);const t0=Math.min(...ts),t1=Math.max(...ts);const vals=reqs.map(r=>r[key]||0);const mx=Math.max(1,...vals);
+function drawScatter(cv,reqs,key,color,sizeKey){const s=setup(cv);if(!s)return;const [c,w,h]=s;const pad={l:42,r:12,t:12,b:26};pad.ch=h-pad.t-pad.b;pad.cw=w-pad.l-pad.r;
+  const ts=reqs.map(r=>r.ts);let t0=Infinity,t1=-Infinity,mx=1;for(const v of ts){if(v<t0)t0=v;if(v>t1)t1=v;}for(const r of reqs){const x=r[key]||0;if(x>mx)mx=x;}
   axes(c,w,h,pad);ylab(c,pad,mx);xlab(c,pad,t0,t1);
-  const maxS=Math.max(1,...reqs.map(r=>r[sizeKey]||1));
+  let maxS=1;for(const r of reqs){const v=r[sizeKey]||1;if(v>maxS)maxS=v;}
   reqs.forEach(r=>{const x=pad.l+pad.cw*((r.ts-t0)/((t1-t0)||1));const y=pad.t+pad.ch*(1-(r[key]||0)/mx);const rad=2+4*Math.sqrt((r[sizeKey]||1)/maxS);c.fillStyle=color;c.globalAlpha=.85;c.beginPath();c.arc(x,y,rad,0,7);c.fill();});
   c.globalAlpha=1;}
-function drawLine(cv,reqs,key,color,ymax){const [c,w,h]=setup(cv);const pad={l:42,r:12,t:12,b:26};pad.ch=h-pad.t-pad.b;pad.cw=w-pad.l-pad.r;
-  const ts=reqs.map(r=>r.ts);const t0=Math.min(...ts),t1=Math.max(...ts);const vals=reqs.map(r=>r[key]||0);const mx=ymax||Math.max(1,...vals);
+function drawLine(cv,reqs,key,color,ymax){const s=setup(cv);if(!s)return;const [c,w,h]=s;const pad={l:42,r:12,t:12,b:26};pad.ch=h-pad.t-pad.b;pad.cw=w-pad.l-pad.r;
+  const ts=reqs.map(r=>r.ts);let t0=Infinity,t1=-Infinity,mx=1;for(const v of ts){if(v<t0)t0=v;if(v>t1)t1=v;}for(const r of reqs){const x=r[key]||0;if(x>mx)mx=x;}if(ymax)mx=ymax;
   axes(c,w,h,pad);ylab(c,pad,mx);xlab(c,pad,t0,t1);
   const pts=reqs.map(r=>[pad.l+pad.cw*((r.ts-t0)/((t1-t0)||1)),pad.t+pad.ch*(1-(r[key]||0)/mx)]);
   line(c,pts,color,1.6);
   c.fillStyle=color;pts.forEach(p=>{c.beginPath();c.arc(p[0],p[1],1.8,0,7);c.fill();});}
-function drawKV(pool){const [c,w,h]=setup(document.getElementById('cKV'));const pad={l:42,r:12,t:12,b:26};pad.ch=h-pad.t-pad.b;pad.cw=w-pad.l-pad.r;
+function drawKV(pool){const s=setup(document.getElementById('cKV'));if(!s)return;const [c,w,h]=s;const pad={l:42,r:12,t:12,b:26};pad.ch=h-pad.t-pad.b;pad.cw=w-pad.l-pad.r;
   if(!pool.length){c.fillStyle='#8b95a7';c.fillText('暂无池采样',pad.l+6,pad.t+16);return;}
-  const ts=pool.map(p=>p[0]);const t0=Math.min(...ts),t1=Math.max(...ts);
-  const pos=pool.map(p=>p[2]||1);const used=pool.map(p=>p[1]||0);
-  const mx=Math.max(...pos);
+  const ts=pool.map(p=>p[0]);let t0=Infinity,t1=-Infinity,mx=1;for(const v of ts){if(v<t0)t0=v;if(v>t1)t1=v;}for(const p of pool){const x=p[2]||1;if(x>mx)mx=x;}
   axes(c,w,h,pad);ylab(c,pad,mx);xlab(c,pad,t0,t1);
   const pts=pool.map(p=>[pad.l+pad.cw*((p[0]-t0)/((t1-t0)||1)),pad.t+pad.ch*(1-(p[1]||0)/mx)]);
   c.fillStyle='rgba(168,85,247,.12)';c.beginPath();c.moveTo(pts[0][0],pad.t+pad.ch);pts.forEach(p=>c.lineTo(p[0],p[1]));c.lineTo(pts[pts.length-1][0],pad.t+pad.ch);c.closePath();c.fill();
@@ -1151,12 +1149,18 @@ function renderTable(reqs){const tb=document.getElementById('logBody');const rs=
   if(!rs.length){tb.innerHTML='<tr><td colspan="9" style="text-align:center;color:#8b95a7;padding:18px">窗口内无请求</td></tr>';return;}
   tb.innerHTML=rs.map(r=>{const dur=((r.prefill_ms||0)+(r.decode_ms||0))/1000;const hit=r.prompt_tokens?((r.cached_tokens/r.prompt_tokens)*100).toFixed(1):'0';const cmt=r.rounds?(r.commit/r.rounds).toFixed(2):'—';
     return '<tr><td>'+hm(r.ts)+'</td><td><span class="ep">'+esc((r.endpoint||'').replace('/v1/',''))+'</span></td><td>'+fmt(r.output_tokens)+'</td><td>'+dur.toFixed(1)+'</td><td>'+(r.predicted_per_second||0).toFixed(1)+'</td><td>'+fmt(r.prompt_tokens)+'</td><td>'+hit+'</td><td>'+(r.prompt_per_second||0).toFixed(1)+'</td><td>'+cmt+'</td></tr>';}).join('');}
+let __loading=false, __pending=false;
 async function load(){
+  if(__loading){__pending=true;return;}   // coalesce rapid clicks: never interleave two renders
+  __loading=true;
+  try{ await doLoad(); } finally { __loading=false; if(__pending){__pending=false;load();} }
+}
+async function doLoad(){
   let d;try{d=await jget('/api/pulse?window='+win);}catch(e){document.getElementById('cards').innerHTML='<div class="err">加载失败: '+esc(e.message)+'</div>';return;}
   const reqs=d.requests||[];const pool=d.pool||[];const s=d.stats||{requests:0,decode_mean:0,decode_p50:0,prefill_w:0,hit_rate:0,commit_round:0,out_tokens:0,busy_s:0};
   renderCards(s);
   document.getElementById('liveTxt').textContent='LIVE '+new Date().toLocaleTimeString('zh-CN',{hour12:false})+' · '+d.count+' req';
-  if(!reqs.length){['cDec','cPre','cHit','cCmt','cPrm'].forEach(id=>{const [c,w,h]=setup(document.getElementById(id));c.fillStyle='#8b95a7';c.fillText('窗口内无请求',12,20);});drawKV(pool);renderTable([]);return;}
+  if(!reqs.length){['cDec','cPre','cHit','cCmt','cPrm'].forEach(id=>{const st=setup(document.getElementById(id));if(st){st[0].fillStyle='#8b95a7';st[0].fillText('窗口内无请求',12,20);}});drawKV(pool);renderTable([]);return;}
   drawScatter(document.getElementById('cDec'),reqs,'predicted_per_second','#f97316','output_tokens');
   drawLine(document.getElementById('cPre'),reqs,'prompt_per_second','#3b82f6');
   drawLine(document.getElementById('cHit'),reqs.map(r=>({...r,hit:r.prompt_tokens?(r.cached_tokens/r.prompt_tokens*100):0})),'hit','#22c55e',100);
