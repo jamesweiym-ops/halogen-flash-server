@@ -21,7 +21,6 @@ import argparse
 import asyncio
 import base64
 import binascii
-import calendar
 import io
 import math
 import itertools
@@ -591,410 +590,6 @@ class Metrics:
             out.append("# TYPE %s %s" % (name, kind))
             out.append("%s %s" % (name, ("%d" % value) if isinstance(value, int) else ("%.6g" % value)))
         return "\n".join(out) + "\n"
-
-
-# ---------------------------------------------------------------------------
-# 0.11.1-report: the per-request usage ledger behind /report, shaped after
-# llama.cpp-hub's usage page (token-summary / daily-tokens / request-logs).
-# One JSONL line per finished request, carrying the engine's own D-line
-# numbers, so the page never re-measures anything. Path: $HALOGEN_LEDGER or
-# /models/halogen-usage.jsonl (the model bind-mount, so it survives the
-# container). Append-only, ~200 bytes a request; rotates to <path>.1 at
-# 64 MB. A write failure never breaks serving.
-# ---------------------------------------------------------------------------
-TZ_OFFSET_H = float(os.environ.get("HALOGEN_TZ_OFFSET", "8"))
-
-
-def _local(ts):
-    return time.gmtime(float(ts) + TZ_OFFSET_H * 3600.0)
-
-
-def _label(ts, unit):
-    lt = _local(ts)
-    if unit == "hour":
-        return time.strftime("%H:00", lt)
-    # day: no year on the axis. A rotated full date gets its left edge (the
-    # year) clipped by the canvas boundary, leaving a stray leading hyphen;
-    # the period lives in the chart title instead.
-    return time.strftime("%m-%d", lt)
-
-
-def _month_days(year, month):
-    return calendar.monthrange(year, month)[1]
-
-
-def _anchor_day(year, month):
-    """The day the hourly view is pinned to: the last day of the selected
-    month, except for the current month, where it is today (the month's last
-    day is in the future and would render as an all-zero day)."""
-    lt = _local(time.time())
-    n = _month_days(year, month)
-    if lt.tm_year == year and lt.tm_mon == month:
-        return min(n, lt.tm_mday)
-    return n
-
-
-class RequestLedger:
-    MAX_BYTES = 64 * 1024 * 1024
-
-    def __init__(self, path):
-        self.path = path
-
-    def record(self, ctx, t, d):
-        try:
-            now = time.time()
-            rec = {
-                "ts": round(now, 3),
-                "endpoint": ctx.get("endpoint", ""),
-                "model": ctx.get("model", MODEL_ID),
-                "client": ctx.get("client", ""),
-                "stream": bool(ctx.get("stream")),
-                "status": d.get("reason", ""),
-                "prompt_tokens": int(d.get("n_prompt", 0)),
-                "cached_tokens": int(d.get("n_cached", 0)),
-                "output_tokens": int(d.get("n_gen", 0)),
-                "prefill_ms": round(float(d.get("prefill_ms", 0.0)), 1),
-                "decode_ms": round(float(d.get("decode_ms", 0.0)), 1),
-                "prompt_per_second": t.get("prompt_per_second", 0.0),
-                "predicted_per_second": t.get("predicted_per_second", 0.0),
-                "draft_n": int(t.get("draft_n", 0)),
-                "draft_n_accepted": int(t.get("draft_n_accepted", 0)),
-                "structured": bool(ctx.get("structured")),
-                "elapsed_ms": round((now - float(ctx.get("t_start", now))) * 1000, 1),
-            }
-            try:
-                if os.path.exists(self.path) and os.path.getsize(self.path) > self.MAX_BYTES:
-                    os.replace(self.path, self.path + ".1")
-            except Exception:
-                pass
-            with open(self.path, "a") as f:
-                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-        except Exception:
-            pass
-
-    def _load(self):
-        try:
-            with open(self.path, "r") as f:
-                lines = f.readlines()
-        except FileNotFoundError:
-            return []
-        recs = []
-        for ln in lines:
-            ln = ln.strip()
-            if not ln:
-                continue
-            try:
-                recs.append(json.loads(ln))
-            except Exception:
-                pass
-        return recs
-
-    def usage(self, unit, year, month):
-        """One period, two views:
-        unit=day  -> every day of (year, month); for the current month the
-                     series stops at today, so no future all-zero bars.
-        unit=hour -> the 24 hours of `_anchor_day`, the month's last day (or
-                     today, when the month is the current one)."""
-        empty = {"requests": 0, "prompt": 0, "cached": 0, "output": 0,
-                 "draft": 0, "draft_accepted": 0}
-        if unit == "hour":
-            anchor = _anchor_day(year, month)
-            labels = ["%02d:00" % h for h in range(24)]
-
-            def in_period(lt):
-                return (lt.tm_year == year and lt.tm_mon == month
-                        and lt.tm_mday == anchor)
-        else:
-            anchor = None
-            nd = _month_days(year, month)
-            lt = _local(time.time())
-            if lt.tm_year == year and lt.tm_mon == month:
-                nd = min(nd, lt.tm_mday)
-            labels = ["%02d-%02d" % (month, d) for d in range(1, nd + 1)]
-
-            def in_period(lt):
-                return lt.tm_year == year and lt.tm_mon == month
-        buckets = {}
-        totals = dict(empty)
-        for r in self._load():
-            lt = _local(r.get("ts", 0))
-            if not in_period(lt):
-                continue
-            lab = _label(r.get("ts", 0), unit)
-            b = buckets.setdefault(lab, dict(empty, label=lab))
-            for k, src in (("prompt", "prompt_tokens"),
-                           ("cached", "cached_tokens"),
-                           ("output", "output_tokens"),
-                           ("draft", "draft_n"),
-                           ("draft_accepted", "draft_n_accepted")):
-                v = int(r.get(src, 0))
-                b[k] += v
-                totals[k] += v
-            b["requests"] += 1
-            totals["requests"] += 1
-        return {"unit": unit, "year": year, "month": month,
-                "anchorDay": anchor,
-                "data": [buckets.get(l, dict(empty, label=l)) for l in labels],
-                "totals": totals}
-
-    def months(self):
-        """(year, month) pairs present in the ledger, plus the current month,
-        newest first — the two period dropdowns are built from this."""
-        seen = set()
-        for r in self._load():
-            lt = _local(r.get("ts", 0))
-            seen.add((lt.tm_year, lt.tm_mon))
-        lt = _local(time.time())
-        seen.add((lt.tm_year, lt.tm_mon))
-        return sorted(({"year": y, "month": m} for y, m in seen),
-                      key=lambda x: (x["year"], x["month"]), reverse=True)
-
-    def logs(self, page, page_size):
-        recs = sorted(self._load(), key=lambda r: r.get("ts", 0), reverse=True)
-        total = len(recs)
-        start = max(0, (page - 1) * page_size)
-        out = []
-        for r in recs[start:start + page_size]:
-            rr = dict(r)
-            rr["time"] = time.strftime("%Y-%m-%d %H:%M:%S",
-                                      time.gmtime(r.get("ts", 0) + TZ_OFFSET_H * 3600))
-            out.append(rr)
-        return {"total": total, "page": page, "pageSize": page_size,
-                "totalPages": (total + page_size - 1) // page_size, "records": out}
-
-    def totals(self):
-        t = {"requests": 0, "prompt": 0, "cached": 0, "output": 0,
-             "draft": 0, "draft_accepted": 0, "by_endpoint": {}}
-        for r in self._load():
-            t["requests"] += 1
-            t["prompt"] += int(r.get("prompt_tokens", 0))
-            t["cached"] += int(r.get("cached_tokens", 0))
-            t["output"] += int(r.get("output_tokens", 0))
-            t["draft"] += int(r.get("draft_n", 0))
-            t["draft_accepted"] += int(r.get("draft_n_accepted", 0))
-            ep = r.get("endpoint", "?")
-            e = t["by_endpoint"].setdefault(ep, {"requests": 0, "prompt": 0,
-                                               "cached": 0, "output": 0})
-            e["requests"] += 1
-            e["prompt"] += int(r.get("prompt_tokens", 0))
-            e["cached"] += int(r.get("cached_tokens", 0))
-            e["output"] += int(r.get("output_tokens", 0))
-        try:
-            t["file_bytes"] = os.path.getsize(self.path)
-        except OSError:
-            t["file_bytes"] = 0
-        t["file"] = self.path
-        t["hit_rate"] = round(t["cached"] / t["prompt"], 4) if t["prompt"] else None
-        return t
-
-
-REPORT_HTML = """<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>halogen 用量报表</title>
-<style>
-:root{--bg:#0f1117;--card:#171a23;--border:#262b38;--fg:#e5e7eb;--muted:#9aa4b2;--accent:#6366f1;--accent2:#22d3ee;--green:#34d399;--amber:#f59e0b;}
-*{box-sizing:border-box;}
-body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,"PingFang SC","Microsoft YaHei",sans-serif;}
-.wrap{max-width:1100px;margin:0 auto;padding:18px;}
-h1{font-size:18px;margin:0 0 14px;display:flex;align-items:center;gap:8px;}
-.tabs{display:flex;gap:4px;background:var(--card);border:1px solid var(--border);border-radius:10px;padding:3px;margin-bottom:14px;}
-.tabs button{flex:1;padding:8px 12px;border:none;border-radius:7px;background:transparent;color:var(--muted);font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;}
-.tabs button.active{background:rgba(99,102,241,.14);color:#c7d2fe;}
-.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:14px;}
-.card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:12px 14px;}
-.card .k{color:var(--muted);font-size:12px;margin-bottom:4px;}
-.card .v{font-size:22px;font-weight:700;}
-.card .v small{font-size:12px;color:var(--muted);font-weight:400;margin-left:4px;}
-.panel{display:none;}
-.panel.active{display:block;}
-.chartcard{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:14px;margin-bottom:14px;}
-.chart-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:8px;}
-.chart-title{font-weight:700;}
-.units{display:flex;gap:4px;}
-.units button{padding:5px 10px;border:1px solid var(--border);border-radius:6px;background:transparent;color:var(--muted);font-size:12px;cursor:pointer;font-family:inherit;}
-.units button.active{background:var(--accent);border-color:var(--accent);color:#fff;}
-.period{display:flex;gap:6px;}
-.period select{padding:5px 8px;border:1px solid var(--border);border-radius:6px;background:var(--card);color:var(--fg);font-size:12px;font-family:inherit;}
-canvas{width:100%;height:300px;display:block;}
-.legend{display:flex;gap:16px;margin-top:8px;font-size:12px;color:var(--muted);flex-wrap:wrap;}
-.legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:middle;}
-table{width:100%;border-collapse:collapse;font-size:12.5px;}
-th,td{padding:7px 8px;text-align:right;border-bottom:1px solid var(--border);white-space:nowrap;}
-th{color:var(--muted);font-weight:600;position:sticky;top:0;background:var(--card);}
-td:first-child,th:first-child{text-align:left;}
-.scroll{max-height:520px;overflow:auto;border:1px solid var(--border);border-radius:10px;}
-.pager{display:flex;gap:8px;align-items:center;justify-content:center;margin-top:10px;color:var(--muted);font-size:12px;}
-.pager button{padding:5px 10px;border:1px solid var(--border);border-radius:6px;background:transparent;color:var(--fg);cursor:pointer;font-family:inherit;}
-.pager button:disabled{opacity:.4;cursor:default;}
-.ep{padding:1px 6px;border-radius:5px;font-size:11px;background:rgba(34,211,238,.12);color:var(--accent2);}
-.err{color:#f87171;padding:20px;text-align:center;}
-.muted{color:var(--muted);}
-</style>
-</head>
-<body>
-<div class="wrap">
-  <h1>&#128202; halogen 用量报表</h1>
-  <div class="tabs">
-    <button class="active" data-tab="sum" onclick="go('sum')">Token 汇总</button>
-    <button data-tab="log" onclick="go('log')">请求明细</button>
-  </div>
-
-  <div class="panel active" id="panel-sum">
-    <div class="cards" id="cards"></div>
-    <div class="chartcard">
-      <div class="chart-head">
-        <div class="chart-title" id="chartTitle">按日统计</div>
-        <div class="units" id="units">
-          <button data-u="hour" onclick="setUnit('hour')">按小时</button>
-          <button data-u="day" class="active" onclick="setUnit('day')">按日</button>
-        </div>
-        <div class="period">
-          <select id="yearSel" onchange="onYear()"></select>
-          <select id="monthSel" onchange="loadUsage()"></select>
-        </div>
-      </div>
-      <canvas id="cv"></canvas>
-      <div class="legend">
-        <span><i style="background:#6366f1"></i>输入 Prompt</span>
-        <span><i style="background:#22d3ee"></i>命中缓存</span>
-        <span><i style="background:#34d399"></i>输出 Output</span>
-      </div>
-    </div>
-  </div>
-
-  <div class="panel" id="panel-log">
-    <div class="chartcard">
-      <div class="chart-head"><div class="chart-title">请求明细</div><div class="muted" id="logCount"></div></div>
-      <div class="scroll">
-        <table>
-          <thead><tr>
-            <th>时间</th><th>端点</th><th>流式</th><th>状态</th>
-            <th>Prompt</th><th>缓存</th><th>输出</th>
-            <th>Prefill</th><th>pp tok/s</th><th>Decode</th><th>tg tok/s</th><th>客户端</th>
-          </tr></thead>
-          <tbody id="logBody"></tbody>
-        </table>
-      </div>
-      <div class="pager">
-        <button id="prev" onclick="pg(-1)">&larr; 上一页</button>
-        <span id="pageInfo"></span>
-        <button id="next" onclick="pg(1)">下一页 &rarr;</button>
-      </div>
-    </div>
-  </div>
-</div>
-<script>
-let unit='day', page=1, pages=1, months=[], curRows=[];
-function fmt(n){n=n||0;if(n>=1e9)return (n/1e9).toFixed(2)+'B';if(n>=1e6)return (n/1e6).toFixed(2)+'M';if(n>=1e3)return (n/1e3).toFixed(1)+'K';return ''+n;}
-function esc(s){return (''+(s==null?'':s)).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
-function go(t){document.querySelectorAll('.tabs button').forEach(b=>b.classList.toggle('active',b.dataset.tab===t));document.querySelectorAll('.panel').forEach(p=>p.classList.toggle('active',p.id==='panel-'+t));if(t==='log')loadLogs();}
-function setUnit(u){unit=u;document.querySelectorAll('#units button').forEach(b=>b.classList.toggle('active',b.dataset.u===u));loadUsage();}
-async function jget(u){const r=await fetch(u);return r.json();}
-function card(k,v,s){return '<div class="card"><div class="k">'+k+'</div><div class="v">'+v+(s?'<small>'+s+'</small>':'')+'</div></div>';}
-async function loadMonths(){
-  let d=[];try{d=(await jget('/api/report/months')).data||[];}catch(e){}
-  months=d;
-  const ys=[...new Set(months.map(m=>m.year))];
-  const ysel=document.getElementById('yearSel');
-  ysel.innerHTML=ys.map(y=>'<option value="'+y+'">'+y+'年</option>').join('');
-  if(ys.length)ysel.value=ys[0];
-  onYear();
-}
-function onYear(){
-  const y=+document.getElementById('yearSel').value;
-  const ms=months.filter(m=>m.year===y).map(m=>m.month).sort((a,b)=>b-a);
-  const msel=document.getElementById('monthSel');
-  msel.innerHTML=ms.map(m=>'<option value="'+m+'">'+m+'月</option>').join('');
-  if(ms.length)msel.value=ms[0];
-  loadUsage();
-}
-async function loadUsage(){
-  const y=+document.getElementById('yearSel').value||new Date().getFullYear();
-  const m=+document.getElementById('monthSel').value||(new Date().getMonth()+1);
-  let r=null;try{r=await jget('/api/report/usage?unit='+unit+'&year='+y+'&month='+m);}catch(e){}
-  const rows=(r&&r.data)||[];
-  curRows=rows;
-  const t=(r&&r.totals)||{};
-  const hr=t.prompt?((t.cached/t.prompt)*100).toFixed(1)+'%':'—';
-  document.getElementById('cards').innerHTML=
-    card('请求数',fmt(t.requests))+
-    card('总输入 Token',fmt(t.prompt))+
-    card('总命中缓存',fmt(t.cached))+
-    card('缓存命中率',hr)+
-    card('总输出 Token',fmt(t.output))+
-    card('草稿接受',fmt(t.draft_accepted)+' / '+fmt(t.draft));
-  const ym=y+'-'+String(m).padStart(2,'0');
-  const sub=(unit==='hour')
-    ? (ym+'-'+String((r&&r.anchorDay)||'').padStart(2,'0')+' · 24小时')
-    : (ym+' · 每日');
-  document.getElementById('chartTitle').textContent={hour:'按小时',day:'按日'}[unit]+'统计 · '+sub;
-  drawChart(rows);
-}
-function drawChart(rows){
-  const cv=document.getElementById('cv');const dpr=window.devicePixelRatio||1;
-  const W=cv.clientWidth,H=300;cv.width=W*dpr;cv.height=H*dpr;const c=cv.getContext('2d');c.scale(dpr,dpr);c.clearRect(0,0,W,H);
-  const pad={l:44,r:12,t:14,b:56};const cw=W-pad.l-pad.r,ch=H-pad.t-pad.b;
-  let max=0;rows.forEach(r=>{max=Math.max(max,r.prompt,r.cached,r.output);});if(max<=0)max=1;
-  const n=rows.length;if(!n){c.fillStyle='#9aa4b2';c.font='13px sans-serif';c.fillText('暂无数据',pad.l,pad.t+20);return;}
-  const bw=cw/n;const series=[['prompt','#6366f1'],['cached','#22d3ee'],['output','#34d399']];
-  // gridlines
-  c.strokeStyle='#262b38';c.fillStyle='#9aa4b2';c.font='10px sans-serif';c.lineWidth=1;
-  for(let g=0;g<=4;g++){const y=pad.t+ch-ch*g/4;c.beginPath();c.moveTo(pad.l,y);c.lineTo(W-pad.r,y);c.stroke();c.fillText(fmt(max*g/4),4,y+3);}
-  const sub=Math.min(bw/series.length-1,14);const gap=(bw-sub*series.length)/(series.length+1);
-  rows.forEach((r,i)=>{series.forEach((s,j)=>{const val=r[s[0]]||0;const h=ch*val/max;const x=pad.l+i*bw+gap+(sub+gap)*j;const y=pad.t+ch-h;c.fillStyle=s[1];c.fillRect(x,y,sub,Math.max(h,0));});});
-  // x labels: draw EVERY bucket. A stride (one label per 4 days) reads as
-  // missing days even though the bars are contiguous, so when the bars are
-  // too narrow for a horizontal date we rotate -45deg instead of skipping.
-  c.fillStyle='#9aa4b2';
-  const maxW = rows.reduce((m,r)=>Math.max(m,c.measureText(r.label).width),0);
-  const rotate = maxW + 6 > bw;
-  rows.forEach((r,i)=>{
-    const x = pad.l + i*bw + bw/2;
-    if(!rotate){ c.textAlign='center'; c.fillText(r.label, x, H-16); }
-    else {
-      c.save(); c.translate(x, H-20); c.rotate(-Math.PI/4);
-      c.textAlign='right'; c.fillText(r.label, 0, 0); c.restore();
-    }
-  });
-  c.textAlign='left';
-}
-async function loadLogs(){
-  let d={records:[],total:0,totalPages:1};try{d=(await jget('/api/report/logs?page='+page+'&pageSize=30')).data||d;}catch(e){}
-  pages=Math.max(1,d.totalPages||1);
-  document.getElementById('logCount').textContent='共 '+fmt(d.total)+' 条';
-  const tb=document.getElementById('logBody');
-  if(!d.records.length){tb.innerHTML='<tr><td colspan="12" class="muted" style="text-align:center;padding:24px">暂无记录</td></tr>';}
-  else tb.innerHTML=d.records.map(r=>{
-    const tps=(r.predicted_per_second||0).toFixed(1);
-    const pps=(r.prompt_per_second||0).toFixed(1);
-    return '<tr>'+
-      '<td>'+esc(r.time)+'</td>'+
-      '<td><span class="ep">'+esc(r.endpoint)+'</span></td>'+
-      '<td>'+(r.stream?'是':'否')+'</td>'+
-      '<td>'+esc(r.status)+'</td>'+
-      '<td>'+fmt(r.prompt_tokens)+'</td>'+
-      '<td>'+fmt(r.cached_tokens)+'</td>'+
-      '<td>'+fmt(r.output_tokens)+'</td>'+
-      '<td>'+fmt(r.prefill_ms)+'ms</td>'+
-      '<td>'+pps+'</td>'+
-      '<td>'+fmt(r.decode_ms)+'ms</td>'+
-      '<td>'+tps+'</td>'+
-      '<td class="muted">'+esc(r.client)+'</td>'+
-    '</tr>';}).join('');
-  document.getElementById('pageInfo').textContent='第 '+page+' / '+pages+' 页';
-  document.getElementById('prev').disabled=page<=1;
-  document.getElementById('next').disabled=page>=pages;
-}
-function pg(d){page=Math.max(1,Math.min(pages,page+d));loadLogs();}
-window.addEventListener('resize',()=>{if(document.getElementById('panel-sum').classList.contains('active'))drawChart(curRows);});
-loadMonths();
-</script>
-</body>
-</html>
-"""
 
 
 class EngineBusy(HTTPException):
@@ -3001,7 +2596,7 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
 
     async def run(ids, max_tokens, stops, drafter=None, sample=None,
                   penalty="", snap=0, snap2=0, images=None, schema=None,
-                  after=None, escape=(), think=None, seg=None, ctx=None):
+                  after=None, escape=(), think=None, seg=None):
         """Drives the engine and incrementally detokenizes.
 
         Public issue #13, reported with measurements and a patch by
@@ -3075,8 +2670,6 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
                 done = d
                 if d.get("reason") != "error":
                     engine.metrics.record(timings(d), structured=bool(schema))
-                    if ctx is not None:
-                        engine.ledger.record(ctx, timings(d), d)
                 # The serving ledger an earlier change asked for: what real traffic
                 # actually commits per round, not what a fixture does.
                 # an earlier change: this WAS guarded by `if d.get("rounds")`, i.e. it
@@ -3654,14 +3247,26 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
         # text.delta` events, no `encrypted_content`), and, when the request
         # asked for a reasoning summary, the SAME text again as the item's
         # `summary_text` with `response.reasoning_summary_*` events. There is
-        # no separate summarizer; the summary is the reasoning. Both are
-        # sent because they reach different readers: Codex renders summaries
-        # by default and raw content only with `show_raw_agent_reasoning`
-        # (its source, codex-rs/protocol legacy_events.rs), and the request
-        # recorded from the real CLI asks for `{"summary": "auto"}`; an SDK
-        # client reads `content`. The text is trimmed the way the chat route trims
-        # `reasoning_content`, so the item's final text equals what the
-        # non-streamed body carries.
+        # no separate summarizer; the summary is the reasoning. The ITEM
+        # carries both because they reach different readers: Codex renders
+        # summaries by default and raw content only with
+        # `show_raw_agent_reasoning` (its source, codex-rs/protocol
+        # legacy_events.rs), and the request recorded from the real CLI asks
+        # for `{"summary": "auto"}`; an SDK client reads `content`. The text
+        # is trimmed the way the chat route trims `reasoning_content`, so the
+        # item's final text equals what the non-streamed body carries.
+        #
+        # 0.11.3, issue #67 (@UtkuKaynak): the DELTAS go out on ONE stream,
+        # the one the request asked for. 0.7.0 streamed the same text as
+        # `reasoning_text.delta` AND, with a summary asked, as
+        # `reasoning_summary_text.delta`, and a client that follows the
+        # published stream (oh-my-pi's provider, pi's) appends both kinds of
+        # delta to one thinking block -- the raw kind exists for servers that
+        # stream thinking INSTEAD of summaries -- so every word rendered
+        # twice. With a summary asked only the summary events stream (and
+        # its `.done`); without one, only the raw ones. The item on
+        # `output_item.done` and in the final body is unchanged: a client
+        # that finalizes from it takes `summary` first, then `content`.
         rs_id = "rs_" + rid.split("_", 1)[-1]
         rs_open = False
         rs_index = None
@@ -3687,13 +3292,12 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
         def reasoning_delta(rd):
             nonlocal rs_text
             rs_text += rd
-            out = ev("response.reasoning_text.delta", item_id=rs_id,
-                     output_index=rs_index, content_index=0, delta=rd)
-            if want_summary:
-                out += ev("response.reasoning_summary_text.delta",
+            if want_summary:   # #67: one stream, the one asked for
+                return ev("response.reasoning_summary_text.delta",
                           item_id=rs_id, output_index=rs_index,
                           summary_index=0, delta=rd)
-            return out
+            return ev("response.reasoning_text.delta", item_id=rs_id,
+                      output_index=rs_index, content_index=0, delta=rd)
 
         def close_reasoning():
             nonlocal rs_open
@@ -3704,16 +3308,17 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
                     "content": [{"type": "reasoning_text", "text": rs_text}],
                     "encrypted_content": None}
             done_items.append((rs_index, item))
-            out = ev("response.reasoning_text.done", item_id=rs_id,
-                     output_index=rs_index, content_index=0, text=rs_text)
-            if want_summary:
-                out += ev("response.reasoning_summary_text.done",
-                          item_id=rs_id, output_index=rs_index,
-                          summary_index=0, text=rs_text)
+            if want_summary:   # #67: the summary stream's close, not both
+                out = ev("response.reasoning_summary_text.done",
+                         item_id=rs_id, output_index=rs_index,
+                         summary_index=0, text=rs_text)
                 out += ev("response.reasoning_summary_part.done",
                           item_id=rs_id, output_index=rs_index,
                           summary_index=0,
                           part={"type": "summary_text", "text": rs_text})
+            else:
+                out = ev("response.reasoning_text.done", item_id=rs_id,
+                         output_index=rs_index, content_index=0, text=rs_text)
             out += ev("response.output_item.done", output_index=rs_index,
                       item=item)
             return out
@@ -3960,13 +3565,17 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
                     # replays the boundaries a cold run would have used and the
                     # warm answer is bitwise the cold one. Mode 2 snapshots at
                     # every request end and gives that up for a follow-up turn
-                    # that costs a second or two at any prompt length. In mode
-                    # 2 the alignment is meaningless — the snapshot is wherever
-                    # the last request stopped — so it is reported as 0 rather
-                    # than as the chunk, which would read as a guarantee.
+                    # that costs a second or two at any prompt length. Mode 2
+                    # reported 0 through 0.11.2 (the snapshot was wherever the
+                    # request's stable prefix ended); since 0.11.3 the engine
+                    # reports the grid its mid-call snapshots land on (64), and
+                    # an older engine still sends the chunk here, so the mode-2
+                    # value is taken only when it is that small.
                     "snapshot_align":
                         engine.info.get("cache_align", 0)
-                        if engine.info.get("cache_mode", 1) == 1 else 0,
+                        if engine.info.get("cache_mode", 1) == 1
+                        else (engine.info.get("cache_align", 0)
+                              if 0 < engine.info.get("cache_align", 0) <= 256 else 0),
                     # Read from the mode the engine reports, which is the
                     # only thing that decides it. Deriving this from anything
                     # else (a hardcoded limit, or "is the prefill chunked")
@@ -4224,38 +3833,6 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
             st["pool"]["usage_ratio"] = round(u / p_, 4) if p_ else None
         return st
 
-    # ------------------------------------------------------------------
-    # 0.11.1-report: the usage page and its JSON endpoints. Same shape as
-    # llama.cpp-hub's 用量报表: summary cards, a bucketed bar chart over
-    # hour/day/week/month, and a paged per-request log. The data is the
-    # ledger; nothing here measures the engine.
-    # ------------------------------------------------------------------
-    @app.get("/api/report/usage")
-    async def report_usage(unit: str = "day", year: int = 0, month: int = 0):
-        unit = unit if unit in ("hour", "day") else "day"
-        lt = _local(time.time())
-        year = year if 2000 <= year <= 2100 else lt.tm_year
-        month = month if 1 <= month <= 12 else lt.tm_mon
-        return {"success": True, **engine.ledger.usage(unit, year, month)}
-
-    @app.get("/api/report/months")
-    async def report_months():
-        return {"success": True, "data": engine.ledger.months()}
-
-    @app.get("/api/report/logs")
-    async def report_logs(page: int = 1, pageSize: int = 30):
-        page = max(1, page)
-        pageSize = max(1, min(pageSize, 200))
-        return {"success": True, "data": engine.ledger.logs(page, pageSize)}
-
-    @app.get("/api/report/totals")
-    async def report_totals():
-        return {"success": True, "data": engine.ledger.totals()}
-
-    @app.get("/report")
-    async def report_page():
-        return Response(REPORT_HTML, media_type="text/html; charset=utf-8")
-
     @app.get("/v1/models")
     async def models():
         return {"object": "list",
@@ -4431,31 +4008,7 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
                     pre="", forced=False, include_usage=False, snap=0,
                     snap2=0, wire="chat", images=None, want_summary=False,
                     schema=None, think_budget=None, seg=None,
-                    http_request=None, explicit_max=True):
-        # 0.11.1-report: the ledger context. Built once here, from what the
-        # route already knows, and threaded into run() so the D line lands
-        # beside the endpoint name and the client address. The endpoint is
-        # read off the request URL rather than derived from `wire`: `wire`
-        # says how the bytes are serialized, the URL says who asked, and
-        # leaving this signature alone keeps the patch off the line upstream
-        # is most likely to extend.
-        _path = None
-        if http_request is not None:
-            try:
-                _path = http_request.url.path
-            except Exception:
-                _path = None
-        ctx = {
-            "endpoint": _path or ("/v1/" + ("responses" if wire == "responses"
-                                           else ("completions" if not chat
-                                                 else "chat/completions"))),
-            "model": MODEL_ID,
-            "client": (http_request.client.host if http_request is not None
-                       and getattr(http_request, "client", None) else ""),
-            "stream": bool(stream),
-            "structured": bool(schema),
-            "t_start": time.time(),
-        }
+                    http_request=None):
         # 0.8.0: the schema rides the GEN line; the engine constrains
         # only after the thinking block (the </think> token, when the request
         # thinks) and lets a request with tools open a tool call instead of
@@ -4520,30 +4073,12 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
         # context, never a CLI default, because --context and Model::kMaxCtx
         # are two copies of one number and they have already drifted once.
         limit = engine.info.get("ctx") or ctx
-        # The prompt ceiling, checked HERE rather than only deep in run(): on a
-        # streaming route the response headers (200) go out before the body
-        # generator runs, so a check inside the generator surfaces as an
-        # in-stream error event and OpenAI clients report it as the opaque
-        # "stream closed before response.completed" instead of the 400. This
-        # raise happens before the StreamingResponse is built, so the client
-        # gets a real 400 with the numbers.
-        if len(ids) >= limit:
-            raise HTTPException(
-                400, f"prompt {len(ids)} tokens exceeds context {limit}")
         room = limit - len(ids)
         if want > room:
-            if explicit_max:
-                raise HTTPException(
-                    400, f"max_tokens {want} does not fit: prompt is {len(ids)} "
-                         f"tokens and the context is {limit}, leaving room for "
-                         f"{room}.")
-            # The client sent NO budget, so the number being refused is the
-            # server's own default (HALOGEN_MAX_TOKENS_DEFAULT). Shrink it to
-            # what actually fits instead of 400: a default is the server's
-            # number, not the client's ask, and an omitted budget must never
-            # turn a long-context request into an error. An EXPLICIT budget
-            # above the room is still a hard 400 (never silently clamped).
-            want = max(1, room)
+            raise HTTPException(
+                400, f"max_tokens {want} does not fit: prompt is {len(ids)} "
+                     f"tokens and the context is {limit}, leaving room for "
+                     f"{room}.")
         max_tokens = max(1, want)
 
         # an earlier change: a SEMAPHORE of engine slots, not a single lock. At one slot
@@ -4591,7 +4126,7 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
                 try:
                     gen = guarded(run(ids, max_tokens, stops, drafter, sample,
                                       penalty, snap, snap2, images, schema,
-                                      after, escape, think, seg, ctx=ctx))
+                                      after, escape, think, seg))
                     # The Responses wire is a different SERIALIZATION of the
                     # same generation. Everything that matters for safety --
                     # the slot semaphore, the abort on hangup, the inflight
@@ -4682,7 +4217,7 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
             # generator is closed exactly as the streaming arm's is, which is
             # what sends the abort, and the reply nobody reads is a 499.
             gen = run(ids, max_tokens, stops, drafter, sample, penalty, snap,
-                      snap2, images, schema, after, escape, think, seg, ctx=ctx)
+                      snap2, images, schema, after, escape, think, seg)
             gone, n_tok = False, 0
             try:
                 async for delta, d in gen:
@@ -4809,7 +4344,6 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
         return await serve(ids, req.max_tokens, stop_list(req.stop),
                            req.stream, False, "cmpl",
                            http_request=http_request,
-                           explicit_max=("max_tokens" in req.model_fields_set),
                            drafter=drafter_for(req),
                            sample=sample_spec(req),
                            penalty=penalty_spec(req),
@@ -4858,11 +4392,6 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
         return await serve(ids, req.max_tokens, stop_list(req.stop),
                            req.stream, True, "chatcmpl",
                            http_request=http_request,
-                           explicit_max=any(
-                               n in req.model_fields_set
-                               and getattr(req, n) is not None
-                               for n in ("max_tokens", "max_completion_tokens",
-                                         "max_output_tokens")),
                            thinking=thinking,
                            think_budget=server_default(req, "max_thinking_tokens"),
                            drafter=drafter_for(req),
@@ -4954,7 +4483,6 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
         return await serve(ids, shim.max_tokens, stop_list(None),
                            req.stream, True, "resp",
                            http_request=http_request,
-                           explicit_max=req.max_output_tokens is not None,
                            thinking=thinking,
                            think_budget=server_default(shim, "max_thinking_tokens"),
                            drafter=drafter_for(shim),
@@ -5022,10 +4550,6 @@ def main():
               "will be refused", flush=True)
     host, _, port = args.engine.partition(":")
     engine = Engine(host, int(port))
-    # 0.11.1-report: the usage ledger. $HALOGEN_LEDGER wins; the default is
-    # the model bind-mount so the file survives the container being replaced.
-    engine.ledger = RequestLedger(os.environ.get(
-        "HALOGEN_LEDGER", "/models/halogen-usage.jsonl"))
     app = build_app(tok, engine, args.context, args.max_tokens_cap,
                     args.queue_timeout)
 

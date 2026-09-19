@@ -3,7 +3,7 @@
 My working copy of the halogen OpenAI front-end (`serve_api.py`): a
 per-request usage ledger + `/report` dashboard, plus a fix so an omitted
 output budget is clamped to the context room. Built on the current image's
-file, `0.11.4`.
+file, `0.11.9`.
 
 **PRIVATE repo.** `serve_api.py` is the proprietary front-end that ships
 inside `ghcr.io/peonist-ai/halogen-flash-server` and is deliberately **not**
@@ -18,19 +18,20 @@ presenting a derivative as halogen, is not. Do not make this repo public.
 |---|---|
 | `serve_api.py` | the patched front-end currently running on the AIPC |
 | `report.patch` | `git diff` of my changes vs the pristine 0.11.4 file |
-| `pristine-0.11.4.py` | the untouched 0.11.4 front-end = the merge base |
-| `pristine-0.11.1.py` | the earlier merge base, kept for history |
+| `pristine-0.11.9.py` | the untouched 0.11.9 front-end = the merge base |
+| `pristine-0.11.4.py` | the earlier merge base, kept for history |
 | `rebase_report.py` | re-lands the feature onto a NEWER image, then deploys |
 | `ISSUE_report_feature.md` | the write-up for the upstream issue tracker |
 
 Base file identity: `tools/serve_api.py` as shipped in
-`ghcr.io/peonist-ai/halogen-flash-server:0.11.4`, 236853 bytes,
-md5 `f691463f248a3a548ca71a35bb9e3249`. `report.patch` reproduces
+`ghcr.io/peonist-ai/halogen-flash-server:0.11.9`, 245548 bytes,
+md5 `bb976e1e41c932e23eb2a6f11ee71bdd`. `report.patch` reproduces
 `serve_api.py` from that base byte-for-byte.
 
-Current deployment: **0.11.4**. The tree was rebased onto it with a clean
-cherry-pick, and the merge base was then bumped from 0.11.1 to 0.11.4 so the
-patch stays "my changes only" going forward.
+Current deployment: **0.11.9**. Clean cherry-pick; the merge base is now
+0.11.9 so the patch stays "my changes only" going forward. (The 0.11.4 rebase
+had wrongly started deleting upstream's `cache_stats` fields `tapped`,
+`full_hits` and `pool`; that is fixed, and `/cache` reports them again.)
 
 ## What it records
 
@@ -118,7 +119,7 @@ sudo python3 rebase_report.py ghcr.io/peonist-ai/halogen-flash-server:<NEW>
 The script:
 - extracts the pristine `serve_api.py` from the NEW image (throwaway
   container, never runs it),
-- 3-way merges my feature commit onto it (base = `pristine-0.11.4.py`),
+- 3-way merges my feature commit onto it (base = `pristine-0.11.9.py`),
 - auto-resolves the one known conflict shape (a new param added to
   `serve()`'s signature — keeps upstream's signature, keeps my block),
 - gates on: no leftover conflict markers, valid Python AST, feature markers
@@ -135,7 +136,7 @@ present, AST OK.
 
 Upstream moved a region I touch. Open the printed conflict, keep upstream's
 lines and re-add my block below them, then re-run. The merge base is
-`pristine-0.11.4.py` so `git diff` shows exactly what I changed.
+`pristine-0.11.9.py` so `git diff` shows exactly what I changed.
 
 ### Rollback
 
