@@ -4361,6 +4361,16 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
         # context, never a CLI default, because --context and Model::kMaxCtx
         # are two copies of one number and they have already drifted once.
         limit = engine.info.get("ctx") or ctx
+        # The prompt ceiling, checked HERE rather than only deep in run(): on a
+        # streaming route the response headers (200) go out before the body
+        # generator runs, so a check inside the generator surfaces as an
+        # in-stream error event and OpenAI clients report it as the opaque
+        # "stream closed before response.completed" instead of the 400. This
+        # raise happens before the StreamingResponse is built, so the client
+        # gets a real 400 with the numbers.
+        if len(ids) >= limit:
+            raise HTTPException(
+                400, f"prompt {len(ids)} tokens exceeds context {limit}")
         room = limit - len(ids)
         if want > room:
             if explicit_max:

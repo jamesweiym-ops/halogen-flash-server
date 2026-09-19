@@ -1,5 +1,5 @@
 diff --git a/tools/serve_api.py b/tools/serve_api.py
-index aabd879..e6c6cb8 100644
+index aabd879..886b043 100644
 --- a/tools/serve_api.py
 +++ b/tools/serve_api.py
 @@ -21,6 +21,7 @@ import argparse
@@ -639,8 +639,20 @@ index aabd879..e6c6cb8 100644
          # 0.8.0: the schema rides the GEN line; the engine constrains
          # only after the thinking block (the </think> token, when the request
          # thinks) and lets a request with tools open a tool call instead of
-@@ -3937,10 +4363,18 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
+@@ -3935,12 +4361,30 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
+         # context, never a CLI default, because --context and Model::kMaxCtx
+         # are two copies of one number and they have already drifted once.
          limit = engine.info.get("ctx") or ctx
++        # The prompt ceiling, checked HERE rather than only deep in run(): on a
++        # streaming route the response headers (200) go out before the body
++        # generator runs, so a check inside the generator surfaces as an
++        # in-stream error event and OpenAI clients report it as the opaque
++        # "stream closed before response.completed" instead of the 400. This
++        # raise happens before the StreamingResponse is built, so the client
++        # gets a real 400 with the numbers.
++        if len(ids) >= limit:
++            raise HTTPException(
++                400, f"prompt {len(ids)} tokens exceeds context {limit}")
          room = limit - len(ids)
          if want > room:
 -            raise HTTPException(
@@ -662,7 +674,7 @@ index aabd879..e6c6cb8 100644
          max_tokens = max(1, want)
  
          # an earlier change: a SEMAPHORE of engine slots, not a single lock. At one slot
-@@ -3988,7 +4422,7 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
+@@ -3988,7 +4432,7 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
                  try:
                      gen = guarded(run(ids, max_tokens, stops, drafter, sample,
                                        penalty, snap, snap2, images, schema,
@@ -671,7 +683,7 @@ index aabd879..e6c6cb8 100644
                      # The Responses wire is a different SERIALIZATION of the
                      # same generation. Everything that matters for safety --
                      # the slot semaphore, the abort on hangup, the inflight
-@@ -4079,7 +4513,7 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
+@@ -4079,7 +4523,7 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
              # generator is closed exactly as the streaming arm's is, which is
              # what sends the abort, and the reply nobody reads is a 499.
              gen = run(ids, max_tokens, stops, drafter, sample, penalty, snap,
@@ -680,7 +692,7 @@ index aabd879..e6c6cb8 100644
              gone, n_tok = False, 0
              try:
                  async for delta, d in gen:
-@@ -4206,6 +4640,7 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
+@@ -4206,6 +4650,7 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
          return await serve(ids, req.max_tokens, stop_list(req.stop),
                             req.stream, False, "cmpl",
                             http_request=http_request,
@@ -688,7 +700,7 @@ index aabd879..e6c6cb8 100644
                             drafter=drafter_for(req),
                             sample=sample_spec(req),
                             penalty=penalty_spec(req),
-@@ -4254,6 +4689,11 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
+@@ -4254,6 +4699,11 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
          return await serve(ids, req.max_tokens, stop_list(req.stop),
                             req.stream, True, "chatcmpl",
                             http_request=http_request,
@@ -700,7 +712,7 @@ index aabd879..e6c6cb8 100644
                             thinking=thinking,
                             think_budget=server_default(req, "max_thinking_tokens"),
                             drafter=drafter_for(req),
-@@ -4345,6 +4785,7 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
+@@ -4345,6 +4795,7 @@ def build_app(tok, engine, ctx, max_cap=4096, queue_timeout=600):
          return await serve(ids, shim.max_tokens, stop_list(None),
                             req.stream, True, "resp",
                             http_request=http_request,
@@ -708,7 +720,7 @@ index aabd879..e6c6cb8 100644
                             thinking=thinking,
                             think_budget=server_default(shim, "max_thinking_tokens"),
                             drafter=drafter_for(shim),
-@@ -4412,6 +4853,10 @@ def main():
+@@ -4412,6 +4863,10 @@ def main():
                "will be refused", flush=True)
      host, _, port = args.engine.partition(":")
      engine = Engine(host, int(port))
