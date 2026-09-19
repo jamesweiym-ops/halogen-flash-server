@@ -75,6 +75,18 @@ itself fits. This copy marks whether the client actually sent a budget
 Verified live: an 850k-token prompt with no budget returns 200; the same
 prompt with `max_output_tokens: 262144` still returns the 400.
 
+## Over-context prompt returns a real 400, not a dead stream
+
+The prompt ceiling (`len(ids) >= ctx`) used to be checked only inside the
+body generator, i.e. after the streaming route had already sent its 200
+headers. An over-context prompt therefore arrived as an in-stream error
+event and OpenAI clients reported it as the opaque
+`stream disconnected before completion: stream closed before
+response.completed`. `serve()` now checks it before building the
+`StreamingResponse`, so the client gets `400 prompt N tokens exceeds
+context M` directly. (It also stops the omitted-budget clamp from masking
+it, since the room is negative in that case.)
+
 ## Deploy (current shape)
 
 The patched file is bind-mounted over the in-image copy:
